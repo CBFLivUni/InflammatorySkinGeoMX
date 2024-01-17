@@ -1,5 +1,8 @@
 # Psoriasis spatial transcriptomics with Nanostring GeoMX
 
+![image](https://github.com/CBFLivUni/InflammatorySkinGeoMX/assets/8311721/5a375f3e-5eec-4aa8-8307-d3a9a4b6d7e2)
+
+
 ## Running the analysis
 ### Reproducibly with singularity
 
