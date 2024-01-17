@@ -1,0 +1,161 @@
+---
+title: "Differential Expression Analysis - Cell Type"
+author: Jamie Soul
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Differential expression analysis
+
+This notebook uses the pre-computed lme4 differential expression analysis to explore differential genes between cell types.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(cowplot)
+library(factoextra)
+library(gplots)
+library(reshape2)
+library(pheatmap)
+library(writexl)
+library(ggrepel)
+library(patchwork)
+library(edgeR)
+library(limma)
+library(statmod)
+library(BiocParallel)
+library(variancePartition)
+library(ggvenn)
+library(GeoDiff)
+library(UpSetR)
+library(ComplexHeatmap)
+library(ggsci)
+library(RColorBrewer)
+
+source("src/utilityFunctions.R")
+```
+
+## Load the data
+
+```{r}
+target_spatialData <- readRDS("results/normalisedSpatialData.RDS")
+
+diffExp <- readRDS("results/diffExpLME4_Q3_all.RDS")
+contrasts <- read.delim("data/tissueGroups.txt",header=FALSE)
+
+
+diffExp <- diffExp[ diffExp$Contrast %in% contrasts$V1,]
+
+assayDataElement(object = target_spatialData, elt = "log_q") <-
+    assayDataApply(target_spatialData, 2, FUN = log, base = 2, elt = "q_norm")
+
+diffExp$meanExp <- rowMeans(assayDataElement(target_spatialData, elt = "log_q"))
+
+saveRDS(diffExp,file="results/diffExpLME4_Q3_betweenCellTypes.RDS")
+
+GOI <- diffExp %>% group_by(Contrast) %>%
+  filter(FDR<=0.001) %>% pull(Gene) %>% unique()
+
+diffExpOut <- diffExp %>%  named_group_split(Contrast) %>% map(as.data.frame)
+
+write_xlsx(diffExpOut,path = "results/diffExpLME4_betweenCells.xlsx" )
+
+
+```
+
+## Heatmap of cell markers
+
+```{r}
+#| label: fig-cellmarkerHeatmap
+#| fig-cap: Heatmap of the differentially expressed genes between cells
+#| fig-width: 8
+#| fig-height: 8
+pData(target_spatialData)$Staining <- word(pData(target_spatialData)$Annotation,1,sep = "_")
+
+pData(target_spatialData)$`slide name` <- LETTERS[1:8][match(pData(target_spatialData)$`slide name`,unique(pData(target_spatialData)$`slide name`))]
+
+pData(target_spatialData)[pData(target_spatialData)$Disease == "Atopic dermititis","Disease"] <- "AD"
+
+columns <- c("Disease", "Staining","slide name")
+annotationColours <- mapply(function(column,colourSet) makeColours(pData(target_spatialData)[, column],colourSet),columns,c("nrc","Set2","Set3"),SIMPLIFY = FALSE)
+names(annotationColours) <- columns
+
+
+column_ha <- HeatmapAnnotation( df = pData(target_spatialData)[, columns],col=annotationColours)
+
+
+v <- sort(apply(log2(assayDataElement(target_spatialData,elt = "q_norm")),1,var),decreasing = TRUE)[1:3000]
+
+mat_scaled <- t(scale(t(log2(assayDataElement(target_spatialData[names(v), ], elt = "q_norm")))))
+
+p <- Heatmap(mat_scaled, name="zscore" ,show_column_names = FALSE, top_annotation=column_ha,show_row_names = FALSE,show_row_dend = TRUE)
+png("figures/DiffExp/betweenCellsHeatmap.png",width = 10,height=5,res=600,units="in")
+p
+dev.off()
+
+saveRDS(p,file="results/CellHeatmap.RDS")
+p
+
+```
+
+## Heatmap of cell markers
+
+```{r}
+#| label: fig-immunemarkerHeatmap
+#| fig-cap: Heatmap of the differentially expressed genes between immune types
+#| fig-width: 8
+#| fig-height: 8
+#| eval: false
+target_spatialData <- target_spatialData[, pData(target_spatialData)$Tissue != "KRT"]
+
+diffExp <- diffExp[ diffExp$Contrast %in% c("CD8_H - CD4_H","CD8_P - CD4_P","CD8_AD - CD4_AD"),]
+
+GOI <- diffExp %>% group_by(Contrast) %>%
+  filter(FDR<=0.01) %>% pull(Gene) %>% unique()
+
+pData(target_spatialData)$Tissue <- word(pData(target_spatialData)$Annotation,1,sep = "_")
+
+
+column_ha = HeatmapAnnotation( df = pData(target_spatialData)[, c("Disease","Tissue","slide name")])
+
+mat_scaled <- t(scale(t(log2(assayDataElement(target_spatialData, elt = "q_norm")))))
+
+p <- Heatmap(mat_scaled, name="zscore" ,show_column_names = FALSE, top_annotation=column_ha,show_row_names = FALSE,show_row_dend = TRUE)
+
+png("figures/DiffExp/betweenCellsHeatmap_immune.png",width = 10,height=6,res=600,units="in")
+p
+dev.off()
+
+p
+
+```
+
+## Volcano Plots
+
+```{r}
+#| label: fig-volcanoplot
+#| fig-cap: Volcano plot of the differential expression analysis between cell types
+#| fig-height: 32
+#| fig-width: 6
+
+volcanoPlots <- diffExpOut %>%
+  map2(names(diffExpOut),plotVolcano,foldChangeColumn="Estimate",FDRColumn="FDR") %>% 
+  plot_grid(plotlist = . ,ncol = 1)
+
+save_plot(plot = volcanoPlots, filename = "figures/DiffExp/CellTypeVolcanoPlot.png",base_height = 22,base_width = 6,bg="white")
+
+volcanoPlots
+```

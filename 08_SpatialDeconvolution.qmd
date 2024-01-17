@@ -1,0 +1,126 @@
+---
+title: "Spatial decon"
+author:
+  - Jamie Soul
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Spatial Deconvolution
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(SpatialDecon)
+library(Seurat)
+library(ComplexHeatmap)
+library(SingleR)
+library(celldex)
+library(cowplot)
+library(ggsci)
+library(RColorBrewer)
+
+source("src/utilityFunctions.R")
+
+set.seed(123)
+```
+
+## Load the normalised data
+
+```{r}
+target_spatialData <- readRDS("results/normalisedSpatialData.RDS")
+```
+
+## Calculate background scores
+
+```{r}
+bg <- derive_GeoMx_background(norm = target_spatialData@assayData$q_norm,
+                             probepool = fData(target_spatialData)$Module,
+                             negnames = "NegProbe-WTX")
+
+
+```
+
+## Deconvolute using safeTME
+
+```{r}
+res <- runspatialdecon(object = target_spatialData,
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs",
+                      X = safeTME,
+                      align_genes = TRUE,cellmerges=safeTME.matches)
+
+dat <- t(res$beta)
+colnames(dat) <- pData(target_spatialData)$Annotation
+
+dat <- dat[ rowSums(dat)>0,]
+
+
+columns <- c("segment", "Disease")
+annotationColours <- mapply(function(column,colourSet) makeColours(pData(target_spatialData)[, column],colourSet),columns,c("nrc","Set2"),SIMPLIFY = FALSE)
+names(annotationColours) <- columns
+
+column_ha = HeatmapAnnotation( df = pData(target_spatialData)[, c("segment", "Disease")],col=annotationColours,show_legend = FALSE,annotation_name_gp= gpar(fontsize = 18))
+
+col_fun = circlize::colorRamp2(c(-1, 0, 20), c("green", "white", "red"))
+p <- Heatmap(dat, name="beta" ,show_column_names = FALSE, top_annotation=column_ha,col = col_fun, row_names_gp = grid::gpar(fontsize = 18))
+
+saveRDS(p,"results/spatialDeconBroadHeatmap.RDS")
+
+png("figures/Deconv/EndothelialCellTypeHeatmap_broad.png",width = 5,height=7,res=600,units="in")
+p
+dev.off()
+p
+
+
+```
+
+## Deconvolute using skin specific profile
+
+```{r}
+skin <- download_profile_matrix(species = "Human",
+                                       age_group = "Adult", 
+                                       matrixname = "Skin_HCA")
+
+res <- runspatialdecon(object = target_spatialData,
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs",
+                      X = skin,
+                      align_genes = TRUE)
+
+dat <- t(res$beta)
+colnames(dat) <- pData(target_spatialData)$Annotation
+
+dat <- dat[ rowSums(dat)>0,]
+dat <- dat[c("Keratinocytes.1","T.cells"),]
+rownames(dat) <- c("KRT","T Cells")
+
+pData(target_spatialData)$Staining <- pData(target_spatialData)$segment
+
+columns <- c("Staining", "Disease")
+annotationColours <- mapply(function(column,colourSet) makeColours(pData(target_spatialData)[, column],colourSet),columns,c("nrc","Set2"),SIMPLIFY = FALSE)
+names(annotationColours) <- columns
+
+column_ha = HeatmapAnnotation( df = pData(target_spatialData)[, c("Staining", "Disease")],col=annotationColours,show_legend = FALSE,annotation_name_gp= gpar(fontsize = 15))
+
+col_fun = circlize::colorRamp2(c(-1, 0, max(dat)), c("green", "white", "red"))
+p <- Heatmap(dat, name="beta" ,show_column_names = FALSE, top_annotation=column_ha,col = col_fun, row_names_gp = grid::gpar(fontsize = 16))
+
+saveRDS(p,"results/Fig1E_spatialDeconSkinHeatmap.RDS")
+
+png("figures/Deconv/EndothelialCellTypeHeatmap_broad.png",width = 5,height=7,res=600,units="in")
+p
+dev.off()
+p
+```

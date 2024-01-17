@@ -1,0 +1,419 @@
+---
+title: "Differential Expression Analysis - Disease"
+author: Jamie Soul
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Differential expression analysis
+
+This notebook uses various approaches to perform differential expression analysis to identify genes that are significantly altered with disease.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(cowplot)
+library(factoextra)
+library(gplots)
+library(reshape2)
+library(pheatmap)
+library(writexl)
+library(ggrepel)
+library(patchwork)
+library(edgeR)
+library(limma)
+library(statmod)
+library(BiocParallel)
+library(variancePartition)
+library(ggvenn)
+library(GeoDiff)
+library(UpSetR)
+library(ComplexHeatmap)
+library(ggVennDiagram)
+library(ggsci)
+source("src/utilityFunctions.R")
+```
+
+## Load the normalised data
+
+```{r}
+target_spatialData <- readRDS("results/normalisedSpatialData.RDS")
+target_spatialData_GeoDiff <- readRDS("results/GeoDiffNormalisedSpatialData.RDS")
+spatialDataGeoDiff <- readRDS("results/GeoDiffSpatialData.RDS")
+
+#set the cores to use
+cores <- 6
+```
+
+## Between slide analysis
+
+### Set up the data
+
+```{r}
+pData(target_spatialData)[pData(target_spatialData)$segment == "Full ROI","segment"] <- "KRT"
+
+pData(target_spatialData)$testDisease <-
+    factor(pData(target_spatialData)$Disease, c("Psoriasis","Atopic dermititis","Healthy"))
+
+pData(target_spatialData)[["slide"]] <- 
+    factor(pData(target_spatialData)[["slide name"]])
+
+pData(target_spatialData_GeoDiff)[pData(target_spatialData_GeoDiff)$segment == "Full ROI","segment"] <- "KRT"
+
+pData(target_spatialData_GeoDiff)$testDisease <-
+    factor(pData(target_spatialData_GeoDiff)$Disease, c("Psoriasis","Atopic dermititis","Healthy"))
+
+pData(target_spatialData_GeoDiff)[["slide"]] <- 
+    factor(pData(target_spatialData_GeoDiff)[["slide name"]])
+
+assayDataElement(object = target_spatialData, elt = "log_q") <-
+    assayDataApply(target_spatialData, 2, FUN = log, base = 2, elt = "q_norm")
+
+ROIs_high <- sampleNames(target_spatialData_GeoDiff)[which((quantile(fData(target_spatialData_GeoDiff)[["para"]][, 1],
+                                                  probs = 0.90, na.rm = TRUE) -   notes(target_spatialData_GeoDiff)[["threshold"]])*target_spatialData_GeoDiff$sizefact_fitNBth>1)]
+
+target_spatialData_GeoDiff <- target_spatialData_GeoDiff[-which(fData(target_spatialData_GeoDiff)$CodeClass == "Negative"), ]
+
+target_spatialData_GeoDiff <- target_spatialData_GeoDiff[,ROIs_high]
+target_spatialData_GeoDiff <- target_spatialData_GeoDiff[fData(target_spatialData_GeoDiff)[["pvalues"]] < 1e-3,]
+
+
+pData(spatialDataGeoDiff)[["slide"]] <- 
+    factor(pData(spatialDataGeoDiff)[["slide name"]])
+```
+
+### using lme4
+
+Using the Q3 normalised data
+
+```{r}
+#| warning: false
+
+#reorder the levels to make the contrasts more useful
+l <- c("KRT_P" ,"KRT_AD", "KRT_H"  ,"CD8_P" , "CD8_AD","CD8_H", "CD4_P" , "CD4_AD", "CD4_H")
+pData(target_spatialData)$Annotation <- factor(pData(target_spatialData)$Annotation,l)
+
+
+# run LMM:
+# formula follows conventions defined by the lme4 package
+diffExpLME4_Q3 <- lme4DE(target_spatialData, cores = cores)
+
+diffExpLME4Tables_Q3 <- diffExpLME4_Q3 %>%  named_group_split(Contrast) %>% map(as.data.frame)
+
+saveRDS(diffExpLME4_Q3,file="results/diffExpLME4_Q3_all.RDS")
+
+
+contrasts <- read.delim("data/contrastGroups.txt")
+contrasts <- apply(contrasts,1,function(x) paste0(x[2], " - ",x[3]))
+
+diffExpLME4_Q3 <- diffExpLME4_Q3[ diffExpLME4_Q3$Contrast %in% contrasts,]
+diffExpLME4_Q3$meanExp <- rowMeans(assayDataElement(target_spatialData, elt = "log_q"))
+diffExpLME4Tables_Q3 <- diffExpLME4_Q3 %>%  named_group_split(Contrast) %>% map(~arrange(.,FDR)) %>% map(as.data.frame)
+saveRDS(diffExpLME4_Q3,file="results/diffExpLME4_Q3.RDS")
+
+diffExpLME4Tables_Q3 %>% map(~rename(.,c("log2FoldChange"="Estimate"))) %>% write_xlsx(path = "results/diffExpLME4_Q3.xlsx" )
+```
+
+### Compare between regions
+
+```{r}
+#| label: fig-upsetPlot
+#| fig-cap: upSetPlot showing differentially expressed genes identified between different comparisons
+#| fig-width: 12
+#| fig-height: 9
+
+getDiffExpGenes <- function(resultsTable,dir="both"){
+  
+  if(dir=="both"){
+   sig <- resultsTable[ resultsTable$FDR<=0.05 & (resultsTable$Estimate)>=log2(1.5),]
+  } else if (dir=="up"){
+       sig <- resultsTable[ resultsTable$FDR<=0.05 & (resultsTable$Estimate)>=log2(1.5),]
+    
+  } else {
+       sig <- resultsTable[ resultsTable$FDR<=0.05 & (resultsTable$Estimate)<=log2(1/1.5),]
+    
+  }
+  return(sig$Gene)
+  
+}
+
+#write out the number of DEGs
+DEGs <- diffExpLME4Tables_Q3 %>% map(getDiffExpGenes) %>% map(length)
+
+results <- diffExpLME4Tables_Q3 %>% map(getDiffExpGenes) %>% fromList() %>%
+  upset( 
+      nintersects = 10, 
+      nsets = 7, 
+      order.by = "freq", 
+      decreasing = T, 
+      mb.ratio = c(0.6, 0.4),
+      number.angles = 0, 
+      text.scale = 1.5, 
+      point.size = 2.8, 
+      line.size = 1
+      )
+png("figures/DiffExp/upSet_Regions.png",width = 12,height=9,units="in",res=600)
+results
+dev.off()
+results
+
+
+#Venn diagram between Keratinocytes
+
+degsUp <- diffExpLME4Tables_Q3 %>% map(getDiffExpGenes,"up") 
+degsDown <- diffExpLME4Tables_Q3 %>% map(getDiffExpGenes,"down") 
+
+krt_venn_up <- ggvenn(degsUp[c("KRT_AD - KRT_H", "KRT_P - KRT_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) + ylim(c(-1,1.5)) +  scale_fill_npg(palette = "nrc")
+krt_venn_down <- ggvenn(degsDown[c("KRT_AD - KRT_H", "KRT_P - KRT_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) + ylim(c(-1,1.5))  +  scale_fill_npg(palette = "nrc")
+
+cd4_venn_up <- ggvenn(degsUp[c("CD4_AD - CD4_H", "CD4_P - CD4_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) + ylim(c(-1,1.5)) +  scale_fill_npg(palette = "nrc")
+cd4_venn_down <- ggvenn(degsDown[c("CD4_AD - CD4_H", "CD4_P - CD4_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) +  ylim(c(-1,1.5)) +  scale_fill_npg(palette = "nrc")
+
+cd8_venn_up <- ggvenn(degsUp[c("CD8_AD - CD8_H", "CD8_P - CD8_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) + ylim(c(-1,1.5)) +  scale_fill_npg(palette = "nrc")
+cd8_venn_down <- ggvenn(degsDown[c("CD8_AD - CD8_H", "CD8_P - CD8_H")],set_name_size=6,text_size=6,fill_alpha = 0.7) + ylim(c(-1,1.5)) +  scale_fill_npg(palette = "nrc")
+
+saveRDS(list(krt_venn_up=krt_venn_up,krt_venn_down=krt_venn_down),file="results/vennKRT.RDS")
+
+saveRDS(list(cd4_venn_up=cd4_venn_up,cd4_venn_down=cd4_venn_down),file="results/vennCD4.RDS")
+
+saveRDS(list(cd8_venn_up=cd8_venn_up,cd8_venn_down=cd8_venn_down),file="results/vennCD8.RDS")
+
+```
+
+### Volcano Plots
+
+```{r}
+#| label: fig-betweenSlideVolcano
+#| fig-cap: volcano plot of the differential expression for Disease comparisons
+#| fig-width: 8
+#| fig-height: 8
+
+titles <- names(diffExpLME4Tables_Q3)
+volcanoPlots <- diffExpLME4Tables_Q3 %>% map2(titles,plotVolcano) 
+
+saveRDS(volcanoPlots,file="results/volcanoplots.RDS")
+
+save_plot(volcanoPlots$`KRT_P - KRT_H`,filename = "figures/DiffExp/DiseaseVolcanoPlot_KRT_PvsH.png",base_height = 6,base_width = 6,bg="white")
+
+save_plot(volcanoPlots$`CD8_P - CD8_H`,filename = "figures/DiffExp/DiseaseVolcanoPlot_CD8_PvsH.png",base_height = 6,base_width = 6,bg="white")
+
+
+plot_grid(plotlist = volcanoPlots ,ncol = 1) %>% save_plot(filename = "figures/DiffExp/DiseaseVolcanoPlot.png",base_height = 25,base_width = 6,bg="white")
+
+volcanoPlots
+
+
+
+
+```
+
+### Heatmaps
+
+```{r}
+pData(target_spatialData)$Tissue <- word(pData(target_spatialData)$Annotation,1,sep = "_")
+
+diffExpLME4_Q3$Tissue <- word(diffExpLME4_Q3$Contrast,1,sep = "_")
+
+GOI <- diffExpLME4_Q3 %>% group_by(Contrast) %>%
+  filter(FDR<=0.05) %>% pull(Gene) %>% unique()
+
+column_ha = HeatmapAnnotation( df = pData(target_spatialData)[, c("Disease","Tissue","slide name","PatientID")])
+
+mat_scaled <- t(scale(t(log2(assayDataElement(target_spatialData[GOI, ], elt = "q_norm")))))
+
+p <- Heatmap(mat_scaled, name="zscore" ,show_column_names = FALSE, top_annotation=column_ha,show_row_names = F)
+
+png("figures/DiffExp/betweenDiseaseHeatmap.png",width = 6,height=7,res=600,units="in")
+p
+dev.off()
+
+
+GOIs <- diffExpLME4_Q3 %>% group_by(Tissue) %>%
+slice_min(abs(FDR),n=40) %>% group_split %>% map(~unique(pull(.,Gene)))
+
+
+```
+
+### MA plot
+
+```{r}
+#| warning: false
+#| label: fig-betweenSlideMA
+#| fig-cap: MA plot of the differential expression
+#| fig-width: 9
+#| fig-height: 20
+
+diffExpLME4_Q3$meanExp <- rowMeans(assayDataElement(target_spatialData,
+                                             elt = "log_q"))
+colnames(diffExpLME4_Q3)[2] <- "Subset"
+betweenSlideMA <- MAPlot(diffExpLME4_Q3[diffExpLME4_Q3$Subset %in% c("CD8_AD - CD8_H","CD8_P - CD8_H","CD8_P - CD8_AD","CD4_AD - CD4_H","CD4_P - CD4_H","CD4_P - CD4_AD"),],FCColumn = "Estimate",FDRColumn = "FDR",n=12)
+
+saveRDS(betweenSlideMA,file="results/TcellMA.RDS")
+
+save_plot(plot = betweenSlideMA, filename = "figures/DiffExp/DiseaseMAPlot.png",base_height = 7,base_width = 8,bg="white")
+
+betweenSlideMA
+```
+
+## Selecting genes to validate
+
+Aim find a minimal set of targets to discriminate diseases/controls in the CD4 and the CD8 subset? Do some of them overlap?
+
+### CD4
+
+```{r}
+#CD4 data
+CD4Diff <- diffExpLME4Tables_Q3$`CD4_P - CD4_H`
+
+CD4MeanExp <- rowMeans(assayDataElement(target_spatialData[ ,pData(target_spatialData)$segment=="CD4+CD3+"], elt = "log_q")) %>% stack()
+colnames(CD4MeanExp) <- c("CD4Exp","Gene")
+CD4Diff <- left_join(CD4Diff,CD4MeanExp,by = "Gene")
+
+KRTMeanExp <- rowMeans(assayDataElement(target_spatialData[ ,pData(target_spatialData)$segment=="KRT"], elt = "log_q")) %>% stack()
+colnames(KRTMeanExp) <- c("KRTExp","Gene")
+CD4Diff <- left_join(CD4Diff,KRTMeanExp,by = "Gene")
+CD4Diff$higherInCD4 <- (CD4Diff$CD4Exp - CD4Diff$KRTExp) > 0
+
+CD4Diff$percentileExp <- percent_rank(CD4Diff$CD4Exp)
+
+CD4Diff.filt <- CD4Diff %>%
+filter(FDR<=0.05 & abs(Estimate)>=log2(2) & percentileExp >=0.6 & higherInCD4 ) %>% arrange(FDR)
+
+#plot strip plots to check
+stripCharts <- map(CD4Diff.filt$Gene,plotStripChart,target_spatialData,elt="log_q") 
+stripChart <- wrap_plots(stripCharts,ncol = 2)  + plot_layout(guides = "collect")
+
+colnames(CD4Diff.filt)[3] <- "log2FoldChange"
+CD4Diff.filt <- CD4Diff.filt[,c(1,3,5)]
+
+save_plot("figures/Validation/CD4_validation.png",stripChart,base_height = 40,base_width = 12,bg="white")
+
+```
+
+### CD8
+
+```{r}
+#CD8 data
+CD8Diff <- diffExpLME4Tables_Q3$`CD8_P - CD8_H`
+
+CD8MeanExp <- rowMeans(assayDataElement(target_spatialData[ ,pData(target_spatialData)$segment=="CD8+CD3+"], elt = "log_q")) %>% stack()
+colnames(CD8MeanExp) <- c("CD8Exp","Gene")
+CD8Diff <- left_join(CD8Diff,CD8MeanExp,by = "Gene")
+
+KRTMeanExp <- rowMeans(assayDataElement(target_spatialData[ ,pData(target_spatialData)$segment=="KRT"], elt = "log_q")) %>% stack()
+colnames(KRTMeanExp) <- c("KRTExp","Gene")
+CD8Diff <- left_join(CD8Diff,KRTMeanExp,by = "Gene")
+CD8Diff$higherInCD8 <- (CD8Diff$CD8Exp - CD8Diff$KRTExp) > 0
+
+CD8Diff$percentileExp <- percent_rank(CD8Diff$CD8Exp)
+
+CD8Diff.filt <- CD8Diff %>%
+filter(FDR<=0.05 & abs(Estimate)>=log2(3) & percentileExp >=0.6 & higherInCD8 ) %>% arrange(FDR)
+
+#plot strip plots to check
+stripCharts <- map(CD8Diff.filt$Gene,plotStripChart,target_spatialData,elt="log_q") 
+stripChart <- wrap_plots(stripCharts,ncol = 2)  + plot_layout(guides = "collect")
+
+colnames(CD8Diff.filt)[3] <- "log2FoldChange"
+CD8Diff.filt <- CD8Diff.filt[,c(1,3,5)]
+
+save_plot("figures/Validation/CD8_validation.png",stripChart,base_height =38,base_width = 12,bg="white")
+
+```
+
+### In both
+
+```{r}
+CD4Diff <- CD4Diff[,c("Gene","Estimate","FDR","percentileExp","higherInCD4")]
+CD8Diff <- CD8Diff[,c("Gene","Estimate","FDR","percentileExp","higherInCD8")]
+
+combined <- left_join(CD4Diff,CD8Diff,by = "Gene",suffix=c("_CD4","_CD8"))
+
+combined.filt <- combined %>%
+filter(FDR_CD4<=0.15 &  FDR_CD8 <=0.15 & abs(Estimate_CD4)>=log2(1.5) & abs(Estimate_CD8) >=log2(1.5) & percentileExp_CD4>=0.6 & percentileExp_CD8 >=0.6 & higherInCD4 & higherInCD8 ) %>% arrange(FDR_CD4)
+
+#plot strip plots to check
+stripCharts <- map(combined.filt$Gene,plotStripChart,target_spatialData,elt="log_q") 
+stripChart <- wrap_plots(stripCharts,ncol = 2)  + plot_layout(guides = "collect")
+
+save_plot("figures/Validation/CD8_AND_CD4_validation.png",stripChart,base_height = 20,base_width = 12,bg="white")
+
+colnames(combined.filt)[c(2,6)] <- c("log2FoldChange_CD4","log2FoldChange_CD8")
+combined.filt <- combined.filt[,c(1:3,6,7)]
+
+list(CD4=CD4Diff.filt,CD8=CD8Diff.filt,Both=combined.filt) %>% write_xlsx(path = "results/Validation.xlsx" )
+
+
+```
+
+### Chosen Panel
+
+```{r}
+#house keeping genes
+GOIs <- read.delim("GOI.txt",header = T)
+GOIs <- GOIs[ GOIs$Gene %in% rownames(target_spatialData),]
+
+both <- GOIs[ GOIs$Type=="Both",]
+
+
+plotStripChart <- function(GOIs,spatialData,elt="q_norm") {
+
+  
+  metaData <- pData(spatialData)[,c("slide name","segment","Disease")]
+  metaData[ metaData$Disease=="Atopic dermititis","Disease"] <- "AD"
+    metaData <-  cbind(metaData,t(assayDataElement(spatialData[GOIs, ], elt = elt)))
+  metaData$Disease <- as.factor(metaData$Disease)
+  metaData <- reshape2::melt(metaData)
+  metaData <- metaData[metaData$segment!="KRT",]
+  
+  ggplot(metaData,
+         aes(x = relevel(Disease,"Healthy"), fill = Disease, color=Disease,
+             y = value)) +
+    geom_jitter(width = .2) +
+    stat_summary(fun.data=data_summary, color="grey") +
+    labs(y = "Expression",x="Disease") +
+    facet_grid(cols =vars(variable), rows =  vars(segment), 
+              scales="free_y", switch = 'y') +
+    theme_cowplot() + theme(legend.position = "none",axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+}
+
+
+stripCharts <- plotStripChart(both$Gene,target_spatialData,elt="log_q") 
+
+
+save_plot("figures/Validation/GOIsExpression.png",stripChart,base_height = 22,base_width = 14,bg="white")
+
+save_plot("figures/SupplementaryFig2.png",stripChart,base_height = 28,base_width = 12,bg="white")
+```
+
+```{r}
+#house keeping genes
+housekeeping <- read.delim("housekeeping.txt",header = F)
+housekeeping <- housekeeping[ housekeeping$V1 %in% rownames(target_spatialData),]
+
+stripCharts <- map(housekeeping,plotStripChart,target_spatialData,elt="log_q") 
+stripChart <- wrap_plots(stripCharts,ncol = 2)  + plot_layout(guides = "collect")
+
+save_plot("figures/Validation/housekeepingExpression.png",stripChart,base_height = 22,base_width = 14,bg="white")
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

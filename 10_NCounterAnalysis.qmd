@@ -1,0 +1,625 @@
+---
+title: "Validation in peripheral blood"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+## Load the libraries
+
+```{r}
+#| message: false
+library(tidyverse)
+library(nanostringr)
+library(NanoStringNCTools)
+library(ggiraph)
+library(ggplot2)
+library(cowplot)
+library(writexl)
+library(MASS)
+library(RUVSeq)
+library(DESeq2)
+library(limma)
+library(matrixStats)
+library(ggsci)
+library(RColorBrewer)
+library(qreport)
+library(ggpubr)
+library(psych)
+library(ComplexHeatmap)
+library(patchwork)
+
+```
+
+## Read in the data
+
+```{r}
+#read in all the rcc files in the data directory
+unzippedFiles <- unzip(zipfile = "data/nCounter.zip",exdir = "data/nCounter") 
+rawFiles <- list.files("data/nCounter",pattern=".RCC",full.names = TRUE)
+
+#read in the metadata
+dat <- readNanoStringRccSet(rawFiles,phenoDataFile = "data/FullMetaData_withScores.txt")
+protocolData(dat)[["SampleID"]] <- sampleNames(dat)
+
+dat$Group[ is.na(dat$Group)] <- "Control"
+dat$SimpleGroup[ is.na(dat$SimpleGroup)] <- "Control"
+dat$Condition <- paste(dat$Group,dat$CellType,dat$Coated,sep="_")
+dat$SimpleCondition <- paste(dat$SimpleGroup,dat$CellType,dat$Coated,sep="_")
+
+
+
+#prepare the qc flags
+rcc_data <- read_rcc(path = "data/nCounter")
+qc <- NanoStringQC(rcc_data$raw,rcc_data$exp)
+
+#save the 
+write_xlsx(rcc_data,path = "results/QCData.xlsx")
+
+```
+
+## Look at the raw data
+
+```{r}
+DT::datatable(rcc_data$raw)
+```
+
+## Set the QC flags for the data
+
+```{r}
+#using the default flags
+dat <- setQCFlags(
+  dat,
+  qcCutoffs = list(
+    Housekeeper = c(failingCutoff = 32, passingCutoff = 100),
+    Imaging = c(fovCutoff = 0.75),
+    BindingDensity = c(
+      minimumBD = 0.1,
+      maximumBD = 2.25,
+      maximumBDSprint = 1.8
+    ),
+    ERCCLinearity = c(correlationValue = 0.95),
+    ERCCLoD = c(standardDeviations = 2)
+  )
+)
+```
+
+## Housekeeping gene expression
+
+The HK Genes QC plot shows the geometric mean of housekeeper genes in each sample. Each dot represents a sample in this plot. The sample IDs are labeled at x-axis. The corresponding geometric mean of housekeeper genes are at y-axis. If you hover mouse over a point, you can find the sample name and its geometric mean. Samples with low housekeeper signal suffer from either low sample input or low reaction efficiency. Ideally the geometric mean of counts will be above 100 for all samples, and a minimum geometric mean of 32 counts is required for analysis. Samples in-between these two thresholds are considered in the analysis, but results from these "borderline" samples should be treated with caution.
+
+```{r}
+#| fig-height: 7
+#| fig-width: 16
+
+g <- autoplot(dat, type = "housekeep-geom") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#make the plot interactive
+#girafe(ggobj = g)
+
+save_plot("figures/nCounter/housekeepingExpression.png", g, base_height = 8,base_width = 6,  bg = "white")
+
+qcFlag <- as.data.frame(sData(dat)$QCFlags)
+qcFlagBorder <- as.data.frame(sData(dat)$QCBorderlineFlags)
+keep <- !(qcFlag$Housekeeping | qcFlagBorder$Housekeeping)
+qc <- qc[keep,]
+
+# dat <- dat[ ,!(qcFlag$Housekeeping | qcFlagBorder$Housekeeping)]
+dat <- dat[ ,!(qcFlag$Housekeeping)]
+
+```
+
+## Binding density QC
+
+The binding density represents the concentration of barcodes measured by the instrument in barcodes per square micron. Each dot in this QC plot represents a sample. The lane ID of samples are labeled at x-axis and the binding density is at y-axis. If you hover mouse over a dot, it will display its Sample ID, lane ID and binding density. The Digital Analyzer may not be able to distinguish each probe from the others if too many are present. The ideal range for assays run on an nCounter MAX or FLEX system is 0.1 - 2.25 spots per square micron and assays run on the nCounter SPRINT system should have a range of 0.1 - 1.8 spots per square micron.
+
+```{r}
+g <- autoplot(dat, type = "lane-bindingDensity") + theme_cowplot()
+#girafe(ggobj = g)
+save_plot("figures/nCounter/bindingDensity.png", g,base_height = 8, base_width = 6, bg = "white")
+
+```
+
+## Imaging QC
+
+The Imaging QC metric reports the percentage of fields of view (FOVs) the Digital Analyzer or SPRINT was able to capture. Each dot represents a sample. The lane IDs are labeled at x-axis and the counted FOV is at y-axis. If you hover mouse over a point, it will display its sample ID, lane ID and counted FOV. At least 75% of FOVs should be successful to obtain robust data. In this case, all samples passed the 75% threshold, so they all pass Imaging QC.
+
+```{r}
+g <- autoplot(dat, type = "lane-fov") + theme_cowplot()
+#girafe(ggobj = g)
+save_plot("figures/nCounter/imagingQC.png", g, base_height = 8, base_width = 6, bg = "white")
+```
+
+## ERCC Linearity QC
+
+The ERCC Linearity QC metric performs a correlation analysis after Log(2) transformation of the expression values. Each line in this plot represents a sample. The concentration is labeled at x-axis and gene expressions are displayed at y-axis. If you hover mouse over a line, it will show the sample ID, concentration, gene expresson and the correlation. The correlation is tested between the known concentrations of positive control target molecules added by NanoString and the resulting Log(2) counts. Correlation values lower than 0.95 may indicate an issue with the hybridization reaction and/or assay performance. In this case, all samples have correlation values above or equal to 0.95, so they all pass ERCC linearity QC.
+
+```{r}
+g <- autoplot(dat, type = "ercc-linearity") + theme_cowplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#girafe(ggobj = g)
+save_plot("figures/nCounter/erccLinearity.png", g, base_height = 8, base_width = 6, bg = "white")
+```
+
+## ERCC LOD QC
+
+The ERCC limit of detection of the assay compares the positive control probes and the negative control probes. Specifically, it is expected that the 0.5 fM positive control probe (Pos_E) will produce raw counts that are at least two standard deviations higher than the mean of the negative control probes (represented by the boxplot). Each dot in this plot represents a sample. The sample IDs are displayed at x-axis and the raw counts of Pos_E are at y-axis. If you hover mouse over a point, it will show the sample ID and its Pos_E counts. The critical value for each sample is drawn as a red horizontal line for each sample. In this case, all samples pass the LOD QC.
+
+```{r}
+#| fig-height: 10
+#| fig-width: 14
+#| warning: false
+g <- autoplot(dat, type = "ercc-lod") + theme_cowplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#girafe(ggobj = g)
+save_plot("figures/nCounter/erccLOD.png",g,base_height = 8,base_width = 6,  bg = "white")
+```
+
+## Percentage of genes detected above limit of detection
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot percent of genes detected above the limit of detection
+ ggplot(qc, aes(cartridgeID, pergd)) +
+    geom_violin(aes(fill = cartridgeID)) +
+    geom_jitter(height = 0, width = 0.1) +
+    theme(axis.text.x = element_blank()) +
+    ylab("% Genes Detected") +
+   theme_cowplot() +   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+## Boxplots of the raw data
+
+### All genes
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot of the all gene expression before normalisation
+rawMat <-  log2(exprs(dat)+1) %>% as.data.frame() %>% gather() 
+
+metaData <- pData(dat)
+
+rawPlot <- merge(rawMat,metaData,by.x="key",by.y="row.names") %>%
+ggplot(aes(x=key,y=value,fill=Cartridge)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Sample") + theme_cowplot() + scale_x_discrete(labels=labels) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+rawPlot
+```
+
+### Housekeeping
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot of the house keeping gene expression before normalisation
+
+
+rawMat <-  t(log2(exprs(dat)+1)) %>% as.data.frame()  %>% rownames_to_column() %>%   reshape2::melt() %>% filter(stringr::str_detect(variable, 'Housekeeping') )
+
+rawPlot <- merge(rawMat,metaData,by.x="rowname",by.y="row.names") %>%
+ggplot(aes(x=variable,y=value,fill=Group)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Sample") + theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+rawPlot
+
+
+
+```
+
+## RUVSeq Normalisation
+
+```{r}
+
+dat_cd4_uncoated <- dat[ ,dat$CellType=="CD4" & dat$Coated==0]
+dat_cd4_coated <- dat[ ,dat$CellType=="CD4" & dat$Coated==1]
+dat_cd8_uncoated <- dat[ ,dat$CellType=="CD8" & dat$Coated==0]
+dat_cd8_coated <- dat[ ,dat$CellType=="CD8" & dat$Coated==1]
+
+datasets <- list(dat_cd4_uncoated,dat_cd4_coated,dat_cd8_uncoated,dat_cd8_coated)
+
+lods <- sapply(datasets,function(dat){
+  mean(exprs(dat)[fData(dat)$Code=="Negative",]) + (2*sd(exprs(dat)[fData(dat)$Code=="Negative",]))
+})
+
+
+RUV.total <- function(dat,k,exclude = NULL){
+  
+## USE DESEQ2 FORMULATION TO INTEGRATE RAW EXPRESSION
+set <- newSeqExpressionSet(as.matrix(round(exprs(dat))),
+phenoData=pData(dat),
+featureData=fData(dat))
+cIdx <- rownames(set)[fData(set)$CodeClass %in%  c("Positive")]
+cIdx <- cIdx[!(cIdx %in% exclude)]
+## UPPER QUANTILE NORMALIZATION (BULLARD 2010)
+set <- betweenLaneNormalization(set, which="upper")
+## RUVg USING HOUSKEEPING GENES
+set <- RUVg(set, cIdx, k=k)
+dds <- DESeqDataSetFromMatrix(counts(set),colData=pData(set),design=~1)
+rowData(dds) <- fData(set)
+## SIZE FACTOR ESTIMATIONS
+dds <- estimateSizeFactors(dds)
+
+dds <- estimateDispersionsGeneEst(dds)
+cts <- counts(dds, normalized=TRUE)
+disp <- pmax((rowVars(cts) - rowMeans(cts)),0)/rowMeans(cts)^2
+mcols(dds)$dispGeneEst <- disp
+dds <- estimateDispersionsFit(dds, fitType="mean")
+## TRANSFORMATION TO THE LOG SPACE WITH A VARIANCE STABILIZING TRANSFORMATION
+vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
+mat <- assay(vsd)
+## REMOVE THE UNWANTED VARIATION ESTIMATED BY RUVg
+covars <- as.matrix(colData(dds)[,grep("W",colnames(colData(dds))),drop=FALSE])
+mat <- removeBatchEffect(mat, covariates=covars)
+assay(vsd) <- mat
+return(list(dds=dds,vsd = vsd))
+}
+
+datasets <- lapply(datasets,RUV.total,2)
+
+ddsList <- lapply(datasets,"[[",1)
+normList <- lapply(datasets,"[[",2)
+
+```
+
+## Boxplots of the normalised data
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot of the all gene expression after normalisation
+plotNormData <- function(norm.dat){
+  
+  norMat <- gather(as.data.frame(assay(norm.dat)))
+
+metaData <- pData(dat)
+
+normPlot <- merge(norMat,metaData,by.x="key",by.y="row.names") %>%
+ggplot(aes(x=key,y=value,fill=Group)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Sample") + theme_cowplot() + scale_x_discrete(labels=labels) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+normPlot
+}
+normPlots <- lapply(normList,plotNormData)
+names(normPlots) <- c("CD4_0","CD4_1","CD8_0","CD8_1")
+
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(normPlots,cap = 1:length(normPlots),basecap=c("Housekeeping plots"))
+
+```
+
+## Housekeeping
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot of the house keeping gene expression after normalisation
+plotHousekeepingNormData <- function(norm.dat){
+norMat <- as.data.frame(t(assay(norm.dat)))  %>% rownames_to_column() %>%   reshape2::melt() %>% filter(stringr::str_detect(variable, 'Housekeeping') )
+
+normPlot <- merge(norMat,metaData,by.x="rowname",by.y="row.names") %>%
+ggplot(aes(x=variable,y=value,fill=Group)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Sample") + theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+return(normPlot)
+}
+
+normPlots <- lapply(normList,plotHousekeepingNormData)
+names(normPlots) <- c("CD4_0","CD4_1","CD8_0","CD8_1")
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(normPlots,cap = 1:length(normPlots),basecap=c("Housekeeping plots"))
+
+```
+
+## Positive controls
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| 
+# plot of the house keeping gene expression after normalisation
+plotPositiveControls <- function(norm.dat){
+norMat <- as.data.frame(t(assay(norm.dat)))  %>% rownames_to_column() %>%   reshape2::melt() %>% filter(stringr::str_detect(variable, 'Positive') )
+
+normPlot <- merge(norMat,metaData,by.x="rowname",by.y="row.names") %>%
+ggplot(aes(x=variable,y=value,fill=Group)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Sample") + theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+return(normPlot)
+}
+
+normPlots <- lapply(normList,plotPositiveControls)
+names(normPlots) <- c("CD4_0","CD4_1","CD8_0","CD8_1")
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(normPlots,cap = 1:length(normPlots),basecap=c("Positive Control plots"))
+
+```
+
+## PCA of the data
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+#| warning: false
+#| message: false
+# PCA plot of the data
+
+
+PCAPlot <- function(norm.dat){
+  #get the normalised data
+pcaData <- norm.dat
+pcaData <- pcaData[ grepl("Endogenous",rownames(pcaData)),]
+
+#perform pca
+pcaData <- prcomp(t(assay(pcaData)))
+
+#get the explained variance
+percentVar <- pcaData$sdev^2/sum(pcaData$sdev^2)
+
+#plot the pca
+pcaData <- cbind(pcaData$x,as.data.frame(colData(norm.dat)))
+
+
+factors <- c("Group","Cartridge")
+
+plotPCA <- function(factor){
+  
+  factor <- sym(factor)
+  
+ ggplot(data = pcaData, aes(x = PC1, y = PC2, color =!!factor)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ",round(percentVar[1] * 100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] * 100),"% variance")) +
+  coord_fixed() +
+  cowplot::theme_cowplot(font_family = 22)
+  
+
+}
+g <- lapply(factors,plotPCA)
+g <- plot_grid(plotlist = g,nrow = 2)
+return(g)
+}
+
+
+
+pcaPlots <- lapply(normList,PCAPlot)
+names(pcaPlots) <- c("CD4_0","CD4_1","CD8_0","CD8_1")
+
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(pcaPlots,cap = 1:length(pcaPlots),basecap=c("PCAplots"))
+
+```
+
+## Differential expression
+
+```{r}
+#| message: false
+#| warning: false
+
+LOD <- mean(exprs(dat)[fData(dat)$Code=="Negative",]) + (2*sd(exprs(dat)[fData(dat)$Code=="Negative",]))
+
+getDiffExp <- function(params,dds){
+diffexp <- as.data.frame(results(dds,contrast=c(params[1],params[2],params[3])))
+diffexp$contrast <- paste(params[1],params[2],"vs",params[3],sep="_")
+diffexp
+}
+
+
+runDESeq2 <- function(dds,name,LOD,contrasts,design="~W_1+ W_2 + Condition"){
+contrasts <- contrasts[ grep(name,contrasts$Numerator),]
+colData(dds)$Condition <- as.factor(colData(dds)$Condition)
+colData(dds)$SimpleCondition <- as.factor(colData(dds)$SimpleCondition)
+design(dds) <- as.formula(design)
+dds <- dds[grepl("Endogenous",rownames(dds)),]
+dds <- dds[ rowMeans(counts(dds))>=LOD,]
+dds <- DESeq(dds)
+results <- apply(contrasts,1,getDiffExp,dds) %>% bind_rows()
+
+}
+
+contrasts <- read.delim("data/contrasts.txt")
+names <- c("CD4_0","CD4_1","CD8_0","CD8_1")
+resFull <- mapply(runDESeq2,ddsList,names,SIMPLIFY = FALSE,MoreArgs = list(LOD=LOD,contrasts=contrasts))
+names(resFull) <- names
+
+contrasts <- read.delim("data/contrasts_simple.txt")
+resSimple <- mapply(runDESeq2,ddsList,names,SIMPLIFY = FALSE,MoreArgs = list(LOD=LOD,design="~W_1  + W_2 + SimpleCondition",contrasts=contrasts))
+names(resSimple) <- names
+
+
+
+```
+
+## Stripplots of DEGs
+
+```{r}
+#| fig-height: 8
+#| fig-width: 8
+#| message: false
+plotStripPlot <- function(results,countDat,group,selectedGenes=NULL){
+ 
+  
+      results <- results[ results$padj <=0.05,]
+      
+       if(is.null(selectedGenes)){
+         if(nrow(results)==0) return(NULL)
+       }
+
+  if(is.null(selectedGenes)){
+  genes <- rownames(results)
+  genes <- unique(word(genes,start=2,end=2,sep="_"))
+  } else{
+    genes <- selectedGenes
+  }
+  
+  genes <- paste(genes,collapse="|")
+  counts <- assay(countDat) %>% as.data.frame()  %>% rownames_to_column() %>%   reshape2::melt() %>% filter(grepl(genes,rowname)) 
+
+  metaData <- colData(countDat) %>% as.data.frame()
+counts <- merge(counts,metaData,by.x="variable",by.y="row.names")
+
+counts$GeneName <- word(counts$rowname,start=2,end=2,sep="_")
+
+counts$Group <- counts[,group]
+
+counts <- counts %>% mutate(Group=case_when(
+  Group == "Control" ~ "Ctr",
+  Group == "Atop. Dermat." ~ "AD",
+  TRUE ~ Group
+))
+
+
+GeneName <- word(rownames(results),2,2,sep="_")
+group1 <- word(results$contrast,2,2,sep="_")
+group2 <- word(results$contrast,6,6,sep="_")
+group2[group2=="Control"] <- "Ctr"
+group2[group2=="Atop. Dermat."] <- "AD"
+stat.test <- data.frame(GeneName=GeneName,group1,group2,p.adj =signif(results$padj,2))
+
+y.position <- counts %>% group_by(GeneName) %>% summarise(y.position=max(value)+0.1)
+
+stat.test <- merge(stat.test,y.position,by="GeneName")
+
+stat.test[duplicated(stat.test$GeneName),"y.position"]<-stat.test[duplicated(stat.test$GeneName),"y.position"]+0.55
+
+
+
+g <- ggplot(counts,aes(y=value,x=Group,color=Group)) + geom_jitter(width = 0.2) + facet_wrap(~GeneName,scales = "free") + theme_cowplot()+stat_summary(geom="crossbar",fun="mean",colour="black",width=0.2) +theme(legend.position = "none") + stat_pvalue_manual(stat.test, label = "p.adj", tip.length = 0.01) + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  ylab("log2 Expression")
+  return(g)
+}
+
+stripPlotsFull <- mapply(plotStripPlot,resFull,normList,"Group")
+stripPlotsSimple <- mapply(plotStripPlot,resSimple,normList,"SimpleGroup")
+
+saveRDS(stripPlotsFull,file="results/stripPlotsFull.RDS")
+saveRDS(stripPlotsSimple,file="results/stripPlotsSimple.RDS")
+
+
+mapply(function(file,name) save_plot(plot = file,filename = sprintf("figures/nCounter/stripPlotsFull_%s.png",name),base_height = 6,base_width = 6,  bg = "white"),stripPlotsFull,names)
+
+mapply(function(file,name) save_plot(plot = file,filename = sprintf("figures/nCounter/stripPlotsSimple_%s.png",name),base_height = 6,base_width = 6,  bg = "white"),stripPlotsSimple,names)
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(stripPlotsFull,cap = 1:length(stripPlotsFull),basecap=c("stripplots full"))
+
+```
+
+```{r}
+#| echo: false
+#| output: asis
+maketabs(stripPlotsSimple,cap = 1:length(stripPlotsSimple),basecap=c("stripplots simple"))
+
+```
+
+## Final stripplots
+
+```{r}
+#Combined significant genes
+sigResults <- resSimple$CD8_1[ resSimple$CD8_1$padj<=0.05,]
+selectedGenes <- unique(word(rownames( sigResults),2,sep="_"))
+
+
+CD8UnstimulatedCombined <- plotStripPlot(resSimple$CD8_0,normList[[3]],group = "SimpleGroup",selectedGenes) + ggtitle("Unstimulated CD8+") + theme(plot.title = element_text(hjust = 0.5))
+CD8StimulatedCombined <- plotStripPlot(resSimple$CD8_1,normList[[4]],group = "SimpleGroup",selectedGenes) + ggtitle("Stimulated CD8+") + theme(plot.title = element_text(hjust = 0.5))
+
+cd8Combined <- CD8UnstimulatedCombined + CD8StimulatedCombined
+
+
+save_plot(plot = g ,filename = "figures/nCounter/CombinedCD8.png",bg="white",base_height = 4,base_width = 7)
+
+
+#Combined significant genes
+sigResults <- resFull$CD8_1[ resFull$CD8_1$padj<=0.05,]
+selectedGenes <- unique(word(rownames( sigResults),2,sep="_"))
+
+
+CD8UnstimulatedSeperate<- plotStripPlot(resFull$CD8_0,normList[[3]],group = "Group",selectedGenes) + ggtitle("Unstimulated CD8+") + theme(plot.title = element_text(hjust = 0.5))
+CD8StimulatedSeperate <- plotStripPlot(resFull$CD8_1,normList[[4]],group = "Group",selectedGenes) + ggtitle("Stimulated CD8+") + theme(plot.title = element_text(hjust = 0.5))
+
+cd8Seperate <- CD8UnstimulatedSeperate + CD8StimulatedSeperate
+
+
+save_plot(plot = cd8Seperate ,filename = "figures/nCounter/SeperateCD8.png",bg="white",base_height = 6,base_width = 12)
+
+save_plot(plot = g ,filename = "figures/nCounter/SeperateCD8.png",bg="white",base_height = 6,base_width = 12)
+
+#Combined significant genes
+sigResults <- resFull$CD4_1[ resFull$CD4_1$padj<=0.05,]
+selectedGenes <- unique(word(rownames( sigResults),2,sep="_"))
+
+
+CD4UnstimulatedSeperate <- plotStripPlot(resFull$CD4_0,normList[[1]],group = "Group",selectedGenes) + ggtitle("Unstimulated CD4+") + theme(plot.title = element_text(hjust = 0.5))
+CD4StimulatedSeperate <- plotStripPlot(resFull$CD4_1,normList[[2]],group = "Group",selectedGenes) + ggtitle("Stimulated CD4+") + theme(plot.title = element_text(hjust = 0.5))
+
+cd4Seperate <- CD4UnstimulatedSeperate + CD4StimulatedSeperate
+
+
+save_plot(plot = cd4Seperate ,filename = "figures/nCounter/SeperateCD4.png",bg="white",base_height = 7,base_width = 12)
+
+saveRDS(list(cd8Combined=cd8Combined,cd4Seperate=cd4Seperate,cd8Seperate=cd8Seperate),file="results/ncounterPlots.RDS")
+
+
+
+```
+
+### Save the results
+
+```{r}
+
+names(resFull) <- paste0("PsSplit",names(resFull))
+names(resSimple) <- paste0("PsGrouped",names(resSimple))
+
+
+tidyTable <- function(resTable){
+  
+  #extract the gene name
+  resTable <- resTable %>%
+    mutate(Gene=word(rownames(resTable),2,2,sep="_")) %>%
+    mutate(contrast=gsub("_0","UnStim",x = contrast)) %>%
+    mutate(contrast=gsub("_1","Stim",contrast)) %>%
+    relocate(Gene) %>%
+    arrange(padj) %>%
+    as.data.frame()
+  
+    return(resTable)
+}
+
+resultsTables <- c(resFull,resSimple)
+resultsTables <- lapply(resultsTables,tidyTable)
+names(resultsTables) <- gsub("_0","UnStim",names(resultsTables))
+names(resultsTables) <- gsub("_1","Stim",names(resultsTables))
+
+write_xlsx(resultsTables,path = "results/NCounter_DESeq2_Results.xlsx")
+
+```

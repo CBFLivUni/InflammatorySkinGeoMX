@@ -1,0 +1,498 @@
+---
+title: "Quality Control"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+This notebook loads the NanoString dcc files and metadata to perform quality control and filtering of the data.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(testthat)
+library(tidyverse)
+library(ggforce)
+library(readxl)
+library(writexl)
+library(cowplot)
+library(formattable)
+
+source("src/utilityFunctions.R")
+```
+
+## Load data
+
+Raw data and metadata files were downloaded from the NanoString repository. This data is loaded into R using the GeomxTools Bioconductor package, enabling custom quality control, normalisation and differential expression analysis.
+
+```{r}
+#| warning: false
+
+#unzip the files
+pkcFile <- unzip(zipfile = "data/Hs_R_NGS_WTA_v1.0.zip")
+unzippedFiles <- unzip(zipfile = "data/rawdata.zip",exdir = "data/rawdata") 
+
+#Tidy up the metadata txt files
+meta <- read.csv("data/InfoGroups.csv") %>% 
+  mutate(ROILabel=str_pad(ROILabel, 3, pad = "0"))
+
+#parse the lab worksheets
+labworksheet <- list.files(path="data/rawdata",pattern="LabWorksheet.txt",full.names = TRUE) %>%
+  map(~read_delim(.x,skip=14,delim="\t",col_types=cols("scan name" = col_character()))) %>%
+  map(~mutate(.x,roi=gsub("[^0-9.-]", "", roi))) %>%
+  bind_rows()
+
+
+#combine the metadata
+#keep the wells containing the pooled samples and omit the double neg T cells
+combinedMetadata <- left_join(labworksheet, meta, by = c("slide name" = "SlideName", "roi" = "ROILabel","segment"="SegmentLabel")) %>%
+  filter(!is.na(Disease) | `slide name` == "No Template Control")  %>%
+  dplyr::select(-c(DeduplicatedReads,QCFlags))
+
+
+#get the paths to the dcc files for each row of the metadata
+dccFiles <-
+  sapply(combinedMetadata$Sample_ID, function(x) {
+    list.files(path = "data/rawdata",
+               pattern = x,
+               full.names = TRUE)
+  })
+
+#save the metadata as an excel file
+write_xlsx(list(annotationData=combinedMetadata),path = "data/completeMetadata.xlsx" )
+
+sampleAnnotationFile <-  "data/completeMetadata.xlsx"
+
+#read in the count data and the annotations
+#create a NanoStringGeoMxSet object containing everything
+spatialData <-
+  readNanoStringGeoMxSet(
+    dccFiles = dccFiles,
+    pkcFiles = pkcFile,
+    phenoDataFile = sampleAnnotationFile,
+    phenoDataSheet = "annotationData",
+    phenoDataDccColName = "Sample_ID",
+    protocolDataColNames = c("aoi", "roi"),
+    experimentDataColNames = c("panel")
+  )
+
+```
+
+::: {.callout-note collapse="true"}
+## Test for correct data structure
+
+```{r}
+#| code-fold: true
+test_that("metadata and files are in the right order",{
+  expect_equal(length(dccFiles),nrow(combinedMetadata))
+  expect_equal(names(dccFiles),combinedMetadata$Sample_ID)
+})
+
+
+pkcs <- annotation(spatialData)
+module <- gsub(".pkc", "", pkcs)
+
+#no template control samples don't get added
+expectedNumSamples <- nrow(filter(combinedMetadata,`slide name` != "No Template Control"))
+
+test_that("check that spatial data is the right size and annotation", {
+  expect_equal(module, "Hs_R_NGS_WTA_v1.0")
+  expect_equal(dim(spatialData), c("Features" = 18815, "Samples" = expectedNumSamples))
+})
+```
+:::
+
+## Segment Quality control
+
+![Overview of QC steps - taken from the [GeoMXWorkflows vignette](http://bioconductor.org/packages/release/workflows/vignettes/GeoMxWorkflows/inst/doc/GeomxTools_RNA-NGS_Analysis.html)](img/qc_overview.png)
+
+### Segment QC Summary
+
+The first step of the quality control is the setting of thresholds for the sequencing quality. **Note**, due to the lower input area in the T-cell samples these thresholds have been lowered from the defaults.
+
+```{r}
+# Shift counts to one for transformations
+spatialData <- shiftCountsOne(spatialData, useDALogic = TRUE)
+
+#define the thresholds for a PASS sample
+#using relaxed thresholds due to the low area T-cell samples
+QC_params <-
+    list(minSegmentReads = 1000, # Minimum number of reads (1000)
+         percentTrimmed = 80,    # Minimum % of reads trimmed (80%)
+         percentStitched = 50,   # Minimum % of reads stitched (80%)
+         percentAligned = 40,    # Minimum % of reads aligned (80%)
+         percentSaturation = 50, # Minimum sequencing saturation (50%)
+         minNegativeCount = 1,   # Minimum negative control counts
+         maxNTCCount = 9000,     # Maximum counts observed in NTC well
+         minArea = 1000)         # Minimum segment area
+
+#apply the thresholds with experiment QC data
+spatialData <-
+    setSegmentQCFlags(spatialData, qcCutoffs = QC_params)
+
+#use a utility function to get the summary table of the qc flags
+QC <- QCSummary(spatialData)
+
+QCResults <- QC$QCResults
+
+QC$QCTable
+```
+
+### QC histograms
+
+The sequencing quality is generally good, though the T-cell segments have lower alignment rates.
+
+::: panel-tabset
+## Saturation
+
+```{r}
+#| label: fig-saturatedQC
+#| fig-cap: Percentage of Saturation by Segment
+#| fig-width: 7
+#| fig-height: 5
+
+col_by = "segment"
+saturatedPlot <- QC_histogram(sData(spatialData), "Saturated (%)", col_by, 50) +  labs(title = "Sequencing Saturation (%)",
+         x = "Sequencing Saturation (%)")
+
+save_plot(filename = "figures/QC/saturatedQC.png",plot = saturatedPlot,
+          base_height = 4,base_width = 5, bg="white")
+saturatedPlot
+```
+
+## Trimmed
+
+```{r}
+#| label: fig-trimmedQC
+#| fig-cap: Percentage of Trimmed Reads by Segment
+#| fig-width: 7
+#| fig-height: 5
+
+trimmedPlot <- QC_histogram(sData(spatialData), "Trimmed (%)", col_by, 80)
+save_plot(filename = "figures/QC/trimmedQC.png",plot = trimmedPlot,
+          base_height = 4,base_width = 5, bg="white")
+trimmedPlot
+
+```
+
+## Stitched
+
+```{r}
+#| label: fig-stitchedQC
+#| fig-cap: Percentage of Stitched Reads by Segment
+#| fig-width: 7
+#| fig-height: 5
+stitchedPlot <- QC_histogram(sData(spatialData), "Stitched (%)", col_by, 50)
+save_plot(filename = "figures/QC/stitchedQC.png",plot = stitchedPlot,
+          base_height = 4,base_width = 5, bg="white")
+stitchedPlot
+```
+
+## Aligned
+
+```{r}
+#| label: fig-alignedQC
+#| fig-cap: Percentage of Aligned Reads by Segment
+#| fig-width: 7
+#| fig-height: 5
+alignedPlot <- QC_histogram(sData(spatialData), "Aligned (%)", col_by, 40)
+save_plot(filename = "figures/QC/alignedQC.png",plot = alignedPlot,
+          base_height = 4,base_width = 5, bg="white")
+alignedPlot
+```
+
+## Area
+
+```{r}
+#| label: fig-areaQC
+#| fig-cap: Area of segments
+#| fig-width: 7
+#| fig-height: 5
+areaPlot <- QC_histogram(sData(spatialData), "area", col_by, 1000, scale_trans = "log10")
+
+
+save_plot(filename = "figures/QC/areaQC.png",plot = areaPlot,
+          base_height = 4,base_width = 5, bg="white")
+
+areaPlot
+```
+:::
+
+### Explore relationship between area and the alignment rate
+
+The graph of area vs alignment shows the T-cell segments with lower area tend to have lower rates of alignment.
+
+```{r}
+#| label: fig-areaVsAlignment
+#| fig-cap: Segment area versus sequencing alignment rate
+#| fig-width: 5
+#| fig-height: 4
+
+#extract the data
+area <- sData(spatialData)[,"area"]
+alignment <- sData(spatialData)[,"Aligned (%)"][,1]
+sampleID <- sampleNames(spatialData)
+segment <- pData(spatialData)$segment
+
+g <- data.frame(sampleID,alignment,area) %>%
+  ggplot(aes(x=area,y=alignment,color=segment)) +
+  geom_point() +
+  theme_cowplot() +
+  xlab("Segment Area") +
+  ylab("Alignment Rate (%)") +
+  scale_x_log10()
+
+save_plot(filename = "figures/QC/area_vs_alignment.png",plot = g,
+base_height = 4,base_width = 5, bg="white")
+
+g
+```
+
+### Filter flagged QC samples
+
+Using the thresholds defined above the samples passing the QC checks are retained.
+
+```{r}
+#keep those samples passing QC
+spatialData <- spatialData[, QCResults$QCStatus == "PASS"]
+saveRDS(spatialData,file="results/QCPassSpatialData")
+```
+
+After filtering `r length(sampleNames(spatialData))` samples remain.
+
+## Probe Quality control
+
+Probes are checked for quality using the default thresholds and lower quality probes are filtered.
+
+```{r}
+#use recommended probe qc flags
+spatialData <- setBioProbeQCFlags(spatialData, 
+                               qcCutoffs = list(minProbeRatio = 0.1,
+                                                percentFailGrubbs = 20), 
+                               removeLocalOutliers = TRUE)
+
+ProbeQCResults <- fData(spatialData)[["QCFlags"]]
+
+# Define QC table for Probe QC
+qc_df <- data.frame(Passed = sum(rowSums(ProbeQCResults[, -1]) == 0),
+                    Global = sum(ProbeQCResults$GlobalGrubbsOutlier),
+                    Local = sum(rowSums(ProbeQCResults[, -2:-1]) > 0
+                                & !ProbeQCResults$GlobalGrubbsOutlier))
+
+#Subset object to exclude all that did not pass Ratio & Global testing
+spatialData <- 
+    subset(spatialData, 
+           fData(spatialData)[["QCFlags"]][,c("LowProbeRatio")] == FALSE &
+               fData(spatialData)[["QCFlags"]][,c("GlobalGrubbsOutlier")] == FALSE)
+
+#Number of probes and samples remaining after QC
+dim(spatialData)
+
+```
+
+## Limit of quantification gene filtering
+
+### Create gene level data
+
+The probe level data is collapsed to generate gene level data for downstream analysis.
+
+```{r}
+# Check how many unique targets the object has
+length(unique(featureData(spatialData)[["TargetName"]]))
+
+# collapse to targets
+target_spatialData <- aggregateCounts(spatialData)
+dim(target_spatialData)
+
+#now have gene level data e.g
+exprs(target_spatialData)[1:5, 1:2]
+```
+
+### Determine limit of quantification
+
+The limit of quantification allows determination of which genes are likely to have a good signal to noise ratio.
+
+```{r}
+# Define LOQ SD threshold and minimum value
+cutoff <- 2
+minLOQ <- 2
+
+# Calculate LOQ
+LOQ <- data.frame(row.names = colnames(target_spatialData))
+vars <- paste0(c("NegGeoMean_", "NegGeoSD_"),module)
+if(all(vars[1:2] %in% colnames(pData(target_spatialData)))) {
+  LOQ[, module] <-
+    pmax(minLOQ,
+         pData(target_spatialData)[, vars[1]] * 
+           pData(target_spatialData)[, vars[2]] ^ cutoff)
+}
+
+pData(target_spatialData)$LOQ <- LOQ
+```
+
+### Determine if each gene is above the LOQ
+
+```{r}
+LOQ_Mat <- c()
+ind <- fData(target_spatialData)$Module == module
+Mat_i <- t(esApply(target_spatialData[ind, ], 1,
+                       function(x) {
+                           x > LOQ[, module]
+                       }))
+LOQ_Mat <- rbind(LOQ_Mat, Mat_i)
+
+# ensure ordering since this is stored outside of the geomxSet
+LOQ_Mat <- LOQ_Mat[fData(target_spatialData)$TargetName, ]
+```
+
+### Plot the number of genes passing LOQ
+
+```{r}
+#| label: fig-geneDetectionRate
+#| fig-cap: Number of genes detected per segment
+#| fig-width: 5
+#| fig-height: 4
+# Save detection rate information to pheno data
+pData(target_spatialData)$GenesDetected <- 
+    colSums(LOQ_Mat, na.rm = TRUE)
+pData(target_spatialData)$GeneDetectionRate <-
+    pData(target_spatialData)$GenesDetected / nrow(target_spatialData)
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+pData(target_spatialData)$DetectionThreshold <- 
+    cut(pData(target_spatialData)$GeneDetectionRate,
+        breaks = c(0, 0.01, 0.05, 0.1, 0.15, 1),
+        labels = c("<1%", "1-5%", "5-10%", "10-15%", ">15%"))
+
+# stacked bar plot of different cut points (1%, 5%, 10%, 15%)
+detectionRatePlot <- ggplot(pData(target_spatialData),
+       aes(x = DetectionThreshold)) +
+    geom_bar(aes(fill = segment)) +
+    geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+    theme_bw() +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "Segment Type")
+
+
+save_plot(filename = "figures/QC/geneDetectionRatePerSegment.png",plot = detectionRatePlot, base_height = 4,base_width = 5, bg="white")
+
+
+
+classTable <- table(pData(target_spatialData)$DetectionThreshold,
+            pData(target_spatialData)$Disease)
+classTable <- classTable[ rowSums(classTable) > 0,]
+
+detectionRatePlot
+knitr::kable(classTable)
+
+```
+
+The T-cell samples, particularly from the healthy patients make up the samples with a lower gene detection rate.
+
+### Filter segments based on gene detection rate
+
+A filter of \>10% gene detection is applied to the data to ensure good quality.
+
+```{r}
+target_spatialData <-
+    target_spatialData[, pData(target_spatialData)$GeneDetectionRate >= .1]
+
+dim(target_spatialData)
+```
+
+## Gene Detection
+
+### Calculate gene detection rate
+
+```{r}
+#| label: fig-geneDetectionPercentage
+#| fig-cap: Number of genes detected per percentage of samples
+#| fig-width: 5
+#| fig-height: 4
+
+# Calculate detection rate:
+LOQ_Mat <- LOQ_Mat[, colnames(target_spatialData)]
+fData(target_spatialData)$DetectedSegments <- rowSums(LOQ_Mat, na.rm = TRUE)
+fData(target_spatialData)$DetectionRate <-
+    fData(target_spatialData)$DetectedSegments / nrow(pData(target_spatialData))
+
+# Plot detection rate:
+plot_detect <- data.frame(Freq = c(1, 5, 10, 20, 30, 50))
+plot_detect$Number <-
+    unlist(lapply(c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5),
+                  function(x) {sum(fData(target_spatialData)$DetectionRate >= x)}))
+plot_detect$Rate <- plot_detect$Number / nrow(fData(target_spatialData))
+rownames(plot_detect) <- plot_detect$Freq
+
+detectionPlot <- ggplot(plot_detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+    geom_bar(stat = "identity") +
+    geom_text(aes(label = formatC(Number, format = "d", big.mark = ",")),
+              vjust = 1.6, color = "black", size = 4) +
+    scale_fill_gradient2(low = "lightblue",
+                         high = "dodgerblue3",
+                         limits = c(0,1),
+                         labels = scales::percent) +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                       expand = expansion(mult = c(0, 0))) +
+    labs(x = "% of Segments",
+         y = "Genes Detected, % of Panel > LOQ") +
+  theme_cowplot()
+
+save_plot(filename = "figures/QC/geneDetection.png",plot = detectionPlot,
+          base_height = 4,base_width = 5, bg="white")
+
+detectionPlot
+```
+
+### What is are the most commonly detected genes?
+
+```{r}
+geneHits <- fData(target_spatialData)[order(fData(target_spatialData)$DetectedSegments,decreasing = TRUE),]
+
+#show the first 10 genes of the table as an example - note there are many gene detected in all segments
+knitr::kable(geneHits[1:10,c("TargetName","DetectionRate")],row.names = FALSE)
+
+```
+
+### Filter lowly detected genes
+
+Keep those genes detected in at least 10% of segments.
+
+```{r}
+#keep the negative probes
+negativeProbefData <- subset(fData(target_spatialData), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+target_spatialData <- 
+    target_spatialData[fData(target_spatialData)$DetectionRate >= 0.1 |
+                        fData(target_spatialData)$TargetName %in% neg_probes, ]
+
+dim(target_spatialData)
+
+#save the filtered dataset
+saveRDS(target_spatialData,file="results/filteredSpatialData.RDS")
+
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

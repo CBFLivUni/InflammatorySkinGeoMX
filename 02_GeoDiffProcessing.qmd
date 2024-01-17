@@ -1,0 +1,157 @@
+---
+title: "GeoDiff based quality control"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+This notebook using the GeoDiff approach for model based background estimation to filter the probes and samples.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(GeoDiff)
+
+```
+
+## Load data
+
+The QC filtered data is the starting point for the GeoDiff model based background estimation.
+
+```{r}
+spatialData <- readRDS("results/QCPassSpatialData")
+spatialData <- spatialData[,sampleNames(spatialData)!= "DSP-1012990007352-D-A02.dcc"]
+featureType(spatialData)
+paste("## of Negative Probes:", sum(fData(spatialData)$Negative))
+```
+
+## Fit model
+
+A Poisson model is fit to the data and dispersion is examined to see if the model a reasonable fit.
+
+```{r}
+#| label: fig-poissonModel
+#| fig-cap: QQ-plot of the model fit
+#| fig-width: 6
+#| fig-height: 6
+spatialData <- fitPoisBG(spatialData)
+spatialData <- fitPoisBG(spatialData,"slide name")
+
+summary(pData(spatialData)$sizefact)
+summary(fData(spatialData)$featfact[fData(spatialData)$Negative])
+set.seed(123)
+spatialData <- diagPoisBG(spatialData,split=TRUE)
+notes(spatialData)$disper
+```
+
+## Aggregate probes
+
+Probes are aggregated based on their correlation.
+
+```{r}
+all0probeidx <- which(rowSums(exprs(spatialData))==0)
+if (length(all0probeidx) > 0) {
+    spatialData <- spatialData[-all0probeidx, ]
+}
+spatialData <- aggreprobe(spatialData, use = "cor")
+```
+
+## Background score test
+
+Using the background model, genes expressed above the background of the negative probes across this dataset are filtered using the suggested pvalue threshold of 1e-3.
+
+```{r}
+spatialData <- BGScoreTest(spatialData,useprior = TRUE)
+
+sum(fData(spatialData)[["pvalues"]] < 1e-3, na.rm = TRUE)
+```
+
+## Estimate the size factor
+
+Differences in sequencing depth are taking into account by estimating size factors.
+
+::: callout-note
+A seed is set as this process uses random sampling.
+:::
+
+```{r}
+#| label: fig-bgScoreComparison
+#| fig-cap: Correlation between GeoDiff size factor and QC signal factor
+#| fig-width: 6
+#| fig-height: 6
+set.seed(123)
+
+spatialData <- fitNBth(spatialData, split = TRUE)
+features_high <- rownames(fData(spatialData))[fData(spatialData)$feature_high_fitNBth == 1]
+
+length(features_high)
+
+bgMean <- mean(fData(spatialData)$featfact, na.rm = TRUE)
+
+notes(spatialData)[["threshold"]]
+bgMean
+
+notes(spatialData)$bgMean <- bgMean
+
+cor(spatialData$sizefact, spatialData$sizefact_fitNBth)
+
+plot(spatialData$sizefact, spatialData$sizefact_fitNBth, xlab = "Background Size Factor",
+     ylab = "Signal Size Factor")
+abline(a = 0, b = 1)
+
+# get only biological probes
+posdat <- spatialData[-which(fData(spatialData)$CodeClass == "Negative"), ]
+posdat <- exprs(posdat)
+
+quan <- sapply(c(0.75, 0.8, 0.9, 0.95), function(y)
+  apply(posdat, 2, function(x) quantile(x, probs = y)))
+
+corrs <- apply(quan, 2, function(x) cor(x, spatialData$sizefact_fitNBth))
+names(corrs) <- c(0.75, 0.8, 0.9, 0.95)
+
+corrs
+quan75 <- apply(posdat, 2, function(x) quantile(x, probs = 0.75))
+
+spatialData <- QuanRange(spatialData, split = FALSE, probs = c(0.75, 0.8, 0.9, 0.95))
+
+corrs <- apply(pData(spatialData)[, as.character(c(0.75, 0.8, 0.9, 0.95))], 2, function(x)
+  cor(x, spatialData$sizefact_fitNBth))
+
+names(corrs) <- c(0.75, 0.8, 0.9, 0.95)
+
+corrs
+```
+
+# Sample QC
+
+Poorer quality ROI without high enough signal in comparison to the background are filtered out.
+
+```{r}
+ROIs_high <- sampleNames(spatialData)[which((quantile(fData(spatialData)[["para"]][, 1],
+                                                  probs = 0.90, na.rm = TRUE) -   notes(spatialData)[["threshold"]])*spatialData$sizefact_fitNBth>2)]
+
+features_all <- rownames(posdat)
+
+saveRDS(spatialData,"results/GeoDiffSpatialData.RDS")
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

@@ -1,0 +1,367 @@
+---
+title: "Ligand-receptor signalling inference"
+author: Jamie Soul
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Ligand-receptor signalling inference
+
+This notebook uses NicheNet to infer the t-cell ligand to keratinocyte receptor signalling driving the observed differential expression.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(nichenetr)
+library(tidyverse)
+library(RColorBrewer)
+library(cowplot)
+library(ggpubr)
+library(writexl)
+library(ComplexHeatmap)
+library(patchwork)
+
+source("src/utilityFunctions.R")
+set.seed(123)
+options(timeout = 100000000000)
+```
+
+## Download the ligand-target matrix
+
+```{r}
+if(!file.exists("data/ligand_target_matrix_nsga2r_final.rds")){
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final.rds?download=1"))
+} else {
+  ligand_target_matrix <- readRDS("data/ligand_target_matrix_nsga2r_final.rds")
+}
+
+
+ligand_target_matrix[1:5,1:5]
+```
+
+## Define the expressed ligands and receptors
+
+```{r}
+#load the normalised expressed data
+target_spatialData <- readRDS("results/normalisedSpatialData.RDS")
+
+#determine the expressed genes in atopic dermatitis t-cells
+expressed_genes_sender_AD <- target_spatialData[ ,pData(target_spatialData)$Annotation %in% c("CD8_AD","CD4_AD")] %>%
+  assayDataApply(2, FUN = log, base = 2, elt = "q_norm") %>%
+  which(x = rowMeans(.)>1) %>%
+  names()
+
+#determine the expressed genes in atopic dermatitis keratinocytes
+expressed_genes_receiver_KRT_AD <- target_spatialData[ ,pData(target_spatialData)$Annotation=="KRT_AD"] %>%
+  assayDataApply(2, FUN = log, base = 2, elt = "q_norm") %>% 
+  which(x = rowMeans(.)>1) %>% 
+  names()
+
+#determine the expressed genes in psoriasis t-cells
+expressed_genes_sender_P <- target_spatialData[ ,pData(target_spatialData)$Annotation %in% c("CD8_P","CD4_P")] %>%
+  assayDataApply(2, FUN = log, base = 2, elt = "q_norm") %>%
+  which(x = rowMeans(.)>1) %>%
+  names()
+
+#determine the expressed genes in psoriasis keratinocytes
+expressed_genes_receiver_KRT_P <- target_spatialData[ ,pData(target_spatialData)$Annotation=="KRT_P"] %>%
+  assayDataApply(2, FUN = log, base = 2, elt = "q_norm") %>%
+  which(x = rowMeans(.)>1) %>%
+  names()
+  
+```
+
+## Define the differentially expressed genes
+
+```{r}
+
+geneset_AD = readRDS("results/diffExpLME4_Q3.RDS") %>% 
+  filter(Contrast=="KRT_AD - KRT_H") %>%
+  filter(FDR<=0.05 & abs(Estimate)>=log2(1.5)) %>% 
+  pull(Gene)
+
+geneset_P = readRDS("results/diffExpLME4_Q3.RDS") %>% 
+  filter(Contrast=="KRT_P - KRT_H") %>%
+  filter(FDR<=0.05 & abs(Estimate)>=log2(1.5)) %>%
+  pull(Gene)
+```
+
+## Run NicheNet
+
+```{r}
+nicheNet_AD <- runNicheNetAnalysis(expressed_genes_sender_AD,expressed_genes_receiver_KRT_AD,geneset_AD,senderName = "Prioritized CD8+ ligands",receiverName = "KRT_AD")
+
+nicheNet_P <- runNicheNetAnalysis(expressed_genes_sender_P,expressed_genes_receiver_KRT_P,geneset_P,senderName = "Prioritized CD8+ ligands",receiverName = "KRT_P")
+
+```
+
+## Plot results
+
+### Atopic dermatitis
+
+The histogram of activity scores and the threshold for the atopic dermatitis is shown.
+
+```{r}
+#| label: fig-ligandActivityHistogramAD
+#| fig-cap: Histogram of inferred ligand activity in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+nicheNet_AD$ligandActivityTable %>% arrange(desc(aupr_corrected)) %>%
+  write_xlsx( path = "results/ligandActivity_AD.xlsx", col_names = TRUE)
+
+save_plot("figures/LigandToReceptor/ligandHistogramAD.png",nicheNet_AD$ligandActivityPlot,base_height = 5,base_width = 5,bg="white")
+
+nicheNet_AD$ligandActivityPlot
+
+```
+
+
+```{r}
+#| label: fig-ligandActivityTopAD
+#| fig-cap: Top inferred ligand activity in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/topLigandsAD.png",nicheNet_AD$ligandPearson,base_height = 5,base_width = 6,bg="white")
+
+nicheNet_AD$ligandPearson
+```
+
+```{r}
+#| label: fig-ligandTargetsAD
+#| fig-cap: Histogram of top inferred ligand to targets potentials in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/LigandsToTargetsAD.png",nicheNet_AD$ligandTarget,base_height = 5,base_width = 5,bg="white")
+nicheNet_AD$ligandTarget
+```
+
+```{r}
+#| label: fig-ligandReceptorAD
+#| fig-cap: Histogram of top inferred ligand to targets potentials in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/LigandsToReceptorAD.png",nicheNet_AD$ligandReceptor,base_height = 5,base_width = 5,bg="white")
+nicheNet_AD$ligandReceptor
+
+```
+
+### Psoriasis
+
+The histogram of activity scores and the threshold for the psoriasis is shown.
+
+```{r}
+#| label: fig-ligandActivityHistogramP
+#| fig-cap: Histogram of inferred ligand activity in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+#
+nicheNet_P$ligandActivityTable %>% arrange(desc(aupr_corrected)) %>%
+write_xlsx(path = "results/ligandActivity_Psoriasis.xlsx", col_names = TRUE)
+
+
+save_plot("figures/LigandToReceptor/ligandHistogramP.png",nicheNet_P$ligandActivityPlot,base_height = 5,base_width = 5,bg="white")
+
+nicheNet_P$ligandActivity
+
+```
+
+```{r}
+#| label: fig-ligandActivityTopP
+#| fig-cap: Top inferred ligand activity in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/topLigandsP.png",nicheNet_P$ligandPearson,base_height = 5,base_width = 6,bg="white")
+
+nicheNet_P$ligandPearson
+```
+
+```{r}
+#| label: fig-ligandTargetsP
+#| fig-cap: Histogram of top inferred ligand to targets potentials in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/LigandsToTargetsP.png",nicheNet_P$ligandTarget,base_height = 5,base_width = 5,bg="white")
+nicheNet_P$ligandTarget
+```
+
+```{r}
+#| label: fig-ligandReceptorP
+#| fig-cap: Histogram of top inferred ligand to targets potentials in atopic dermatitis
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+save_plot("figures/LigandToReceptor/LigandsToReceptorP.png",nicheNet_P$ligandReceptor,base_height = 5,base_width = 5,bg="white")
+nicheNet_P$ligandReceptor
+
+```
+
+### Combined results
+
+```{r}
+
+combinedActivity <- merge(nicheNet_P$ligandActivityTable,nicheNet_AD$ligandActivityTable,by="test_ligand",suffixes=c("_P","_AD"),all=TRUE)
+
+segments <- c("CD8_AD","CD8_P","CD4_AD","CD4_P","KRT_P","KRT_AD")
+
+expDat <- lapply(segments,function(x)
+target_spatialData[ ,pData(target_spatialData)$Annotation %in% x,] %>%
+  assayDataApply(2, FUN = log, base = 2, elt = "q_norm") %>% rowMeans(.) %>%
+  stack %>%
+  column_to_rownames("ind"))
+
+expDat <- bind_cols(expDat)
+colnames(expDat)<- segments
+
+combinedActivity <- merge(combinedActivity,expDat,by.x="test_ligand",by.y="row.names")
+
+combinedActivity <- combinedActivity[order(combinedActivity$aupr_corrected_P,decreasing = TRUE),]
+
+best_upstream_ligands_P <- nicheNet_P$ligandActivityTable %>%
+  top_n(10, aupr_corrected) %>% 
+  arrange(-aupr_corrected) %>%
+  pull(test_ligand)
+
+best_upstream_ligands_AD <- nicheNet_AD$ligandActivityTable %>% 
+  top_n(10, aupr_corrected) %>% 
+  arrange(-aupr_corrected) %>% 
+  pull(test_ligand)
+
+ligandActivity <- combinedActivity[c("aupr_corrected_AD","aupr_corrected_P")]
+rownames(ligandActivity) <- combinedActivity$test_ligand
+colnames(ligandActivity) <- c("AD","P")
+
+ranks <- apply(-ligandActivity,2,rank)
+
+combinedActivity <- combinedActivity[ combinedActivity$test_ligand %in% c(best_upstream_ligands_P,best_upstream_ligands_AD),]
+ranks <- ranks[ rownames(ranks) %in% c(best_upstream_ligands_P,best_upstream_ligands_AD),]
+ligandActivity <- ligandActivity[ rownames(ligandActivity) %in% c(best_upstream_ligands_P,best_upstream_ligands_AD),]
+
+col_fun <- circlize::colorRamp2(c(0, max(ligandActivity$P)), c("white", "red"))
+cm <-  ColorMapping(col_fun = col_fun)
+
+
+ligandExp <- combinedActivity[ ,sort(segments)]
+rownames(ligandExp) <- combinedActivity$test_ligand
+
+rowCM <- circlize::colorRamp2(c(0, max(ligandExp)), c("white", "blue"))
+
+row_ha <- rowAnnotation(
+  df = ligandExp,
+  name = "expression",
+  col = list(
+    CD8_AD = rowCM,
+    CD8_P = rowCM,
+    CD4_AD = rowCM,
+    CD4_P = rowCM,
+    KRT_P = rowCM,
+    KRT_AD = rowCM
+  ),
+  show_legend = c(TRUE, rep(FALSE, 5)),
+  annotation_legend_param = list(CD4_AD = list(title = "log2 Exp")),
+  annotation_name_gp = gpar(fontsize = 16)
+)
+
+p <-
+  Heatmap(
+    ligandActivity,
+    name = "activity" ,
+    show_column_names = TRUE,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    right_annotation = row_ha,
+    col = col_fun,
+    row_names_gp = grid::gpar(fontsize = 16),
+    column_names_gp = grid::gpar(fontsize = 16),
+    cell_fun = function(j, i, x, y, w, h, fill) {
+      grid.text(ranks[i, j], x, y, gp = gpar(fontsize = 16,fontface="bold"))
+    }
+)
+
+
+heatmap <-  grid.grabExpr(draw(p,padding= unit(c(7, 12, 15, 2), "mm")))
+
+
+saveRDS(list(heatmap=heatmap,LR_AD=nicheNet_AD$ligandReceptor,LR_P=nicheNet_P$ligandReceptor),file="results/nicheNetPlots.RDS")
+
+write_xlsx(list(Pso=nicheNet_P$ligandActivityTable,AD=nicheNet_AD$ligandActivityTable),path = "results/nicheNet.xlsx")
+
+
+```
+
+## Ligand receptor plots
+
+```{r}
+
+r1 <- nicheNet_AD$ligandReceptor +
+  scale_fill_gradient(
+    low = "white",
+    high = "red",
+    labels = function(x)
+      sprintf("%.1f", x)
+  ) +
+  ylab("Prioritised ligands in AD") +
+  xlab("Receptors") +
+  theme(
+    text = element_text(size = 16, color = "black"),
+    axis.title =  element_text(size = 22),
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(1, "cm"),
+    axis.text = element_text(size = 14, color = "black")
+  )
+
+
+r2 <-
+  nicheNet_P$ligandReceptor +  scale_fill_gradient(
+    low = "white",
+    high = "red",
+    labels = function(x)
+      sprintf("%.1f", x)
+  ) + ylab("Prioritised ligands in Psorasis") + xlab("Receptors") + theme(
+    text = element_text(size = 16, color = "black"),
+    axis.title =  element_text(size = 22),
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(1, "cm"),
+    axis.text = element_text(size = 14, color = "black")
+  )
+
+
+layout <-
+"AACC
+ BBCC"
+
+
+g <-  r1 + r2 + heatmap + plot_annotation(tag_levels = 'A')  + plot_layout(design = layout) &
+  theme(plot.tag = element_text(face = 'bold', size = 22))
+save_plot("figures/Fig4.png",plot = g,base_height = 12,base_width = 12,bg="white")
+
+
+row1 <- cowplot::plot_grid(heatmap,ncol=1,labels = LETTERS[1],label_size = 25)
+row2 <- cowplot::plot_grid(r1,r2,ncol=1,labels = LETTERS[2:3],label_size = 25)
+g <- cowplot::plot_grid(row1,row2,ncol=2,byrow = FALSE,rel_widths = c(0.6,1))
+save_plot("figures/Fig4.png",plot = g,base_height = 14,base_width = 12,bg="white")
+
+
+```

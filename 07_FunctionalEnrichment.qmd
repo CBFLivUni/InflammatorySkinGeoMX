@@ -1,0 +1,175 @@
+---
+title: "Functional Enrichment"
+author: Jamie Soul
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Functional enrichment analysis
+
+This notebook uses GSEA to identify enriched gene ontology terms and KEGG pathways.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(org.Hs.eg.db)
+library(reactome.db)
+library(clusterProfiler)
+library(ggridges)
+library(org.Hs.eg.db)
+library(rrvgo)
+library(tidyverse)
+library(writexl)
+library(cowplot)
+
+source("src/utilityFunctions.R")
+set.seed(123)
+```
+
+## Load the differential expression data
+
+```{r}
+betweenDiseases <- readRDS("results/diffExpLME4_Q3.RDS")
+```
+
+## Between disease states
+
+### GSEA
+
+```{r}
+#| label: fig-DiseaseGOPlot
+#| fig-cap: Dotplot of selected enriched gene ontology terms between disease states
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+egs <- bitr(unique(betweenDiseases$Gene), "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db)
+ranked <- merge(betweenDiseases,egs,by.x="Gene",by.y="SYMBOL")
+
+ranked_KRT <- ranked[ranked$Contrast %in% c("KRT_P - KRT_H","KRT_AD - KRT_H","KRT_P - KRT_AD"),]
+
+GeneOntologyGSEA_KRT <- compareCluster(ranked_KRT,geneClusters = ENTREZID | Estimate ~ Contrast,fun="gseGO",
+                        OrgDb        = org.Hs.eg.db,
+                        ont          = "BP",
+                        minGSSize    = 10,
+                        maxGSSize    = 500,
+                        pvalueCutoff = 0.05,
+                        eps=0)
+  
+results <- as.data.frame(GeneOntologyGSEA_KRT)
+results$genes <- sapply(results$core_enrichment,getGeneSymbol)
+#write the gene ontology results to excel file
+write_xlsx(results,path = "results/diseaseGeneOntology.xlsx" )
+
+
+GOPlot_KRT <- dotplot(GeneOntologyGSEA_KRT,by="Count",showCategory=c("defense response to bacterium","keratinocyte differentiation","positive regulation of NF-kappaB transcription factor activity","stress response to copper ion","negative regulation of viral genome replication","response to type I interferon"),color="enrichmentScore")  + scale_fill_gradient2(low = "blue",mid = "white",high="red",name="Score") +  theme_cowplot(font_size = 20) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Comparison") + ggtitle("GO Enrichment")
+
+
+save_plot("figures/pathways/betweenDisease_GO_MDS_KRT_PvsH.png",GOPlot_KRT,base_height = 7,base_width = 7,bg="white")
+
+saveRDS(GOPlot_KRT,file = "results/GOPlot_KRT.RDS")
+GOPlot_KRT
+
+
+ranked_tcells <- ranked[grep("CD",ranked$Contrast),]
+
+GeneOntologyGSEA_tcells <- compareCluster(ranked_tcells,geneClusters = ENTREZID | Estimate ~ Contrast,fun="gseGO",
+                        OrgDb        = org.Hs.eg.db,
+                        ont          = "BP",
+                        minGSSize    = 10,
+                        maxGSSize    = 500,
+                        pvalueCutoff = 0.05,
+                        eps=0)
+  
+results_tcell <- as.data.frame(GeneOntologyGSEA_tcells)
+results_tcell$genes <- sapply(results_tcell$core_enrichment,getGeneSymbol)
+#write the gene ontology results to excel file
+write_xlsx(list(KRT=results,TCell=results_tcell),path = "results/diseaseGeneOntology.xlsx" )
+
+
+GOPlot_tcells <- dotplot(GeneOntologyGSEA_tcells,by="Count",showCategory=c("leukocyte cell-cell adhesion","adaptive immune response","T cell activation","CD4-positive, alpha-beta T cell differentiation","peptide cross-linking"),color="enrichmentScore")   + scale_fill_gradient2(low = "blue",mid = "white",high="red",name="Score") +  theme_cowplot(font_size = 20) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Comparison")  + ggtitle("GO Enrichment")
+
+
+saveRDS(GOPlot_tcells,file = "results/GOPlot_tcells.RDS")
+
+
+save_plot("figures/pathways/betweenDisease_GO.png",GOPlot_tcells,base_height = 5,base_width = 5,bg="white")
+
+
+GOPlot_tcells
+
+
+```
+
+### KEGG pathways
+
+```{r}
+#| label: fig-DiseasePathwayPlot
+#| fig-cap: Dotplot of selected enriched pathways between disease states
+#| fig-width: 8
+#| fig-height: 8
+#| warning: false
+
+keggGSEA <- compareCluster(data=ranked_KRT,geneClusters = ENTREZID | Estimate ~ Contrast,fun="gseKEGG",
+minGSSize    = 10,
+maxGSSize    = 500,
+pvalueCutoff = 0.05,
+eps=0)
+
+keggResults <- as.data.frame(keggGSEA)
+keggResults$genes <- sapply(keggResults$core_enrichment,getGeneSymbol)
+#write the gene ontology results to excel file
+
+
+g <- dotplot(keggGSEA,by="Count",showCategory=c("Proteasome","IL-17 signaling pathway","Neutrophil extracellular trap formation","Necroptosis","Circadian rhythm"),color="enrichmentScore") + scale_fill_gradient2(low = "blue",mid = "white",high="red",name="Score") +  theme_cowplot(font_size = 20) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Comparison")  + ggtitle("KEGG Enrichment")
+
+saveRDS(g,file = "results/KEGGdotplot.RDS")
+
+save_plot("figures/pathways/betweenDisease_KEGG_KRT.png",g,base_height = 5,base_width = 5,bg="white")
+
+g
+
+
+keggGSEA <- compareCluster(data=ranked_tcells,geneClusters = ENTREZID | Estimate ~ Contrast,fun="gseKEGG",
+minGSSize    = 10,
+maxGSSize    = 500,
+pvalueCutoff = 0.05,
+eps=0)
+
+keggResults_tcells <- as.data.frame(keggGSEA)
+keggResults_tcells$genes <- sapply(keggResults_tcells$core_enrichment,getGeneSymbol)
+write_xlsx(list(KRT=keggResults,TCells=keggResults_tcells),path = "results/diseasePathways.xlsx" )
+
+
+
+
+
+
+g <- dotplot(keggGSEA,by="Count",showCategory=c("ErbB signaling pathway","Th17 cell differentiation","Cytokine-cytokine receptor interaction","Neutrophil extracellular trap formation"),color="enrichmentScore")  + scale_fill_gradient2(low = "blue",mid = "white",high="red",name="Score") +  theme_cowplot(font_size = 20) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("KEGG Enrichment")
+
+saveRDS(g,file = "results/KEGGdotplottcell.RDS")
+
+save_plot("figures/pathways/betweenDisease_KEGG_Tcells.png",g,base_height = 5,base_width = 5,bg="white")
+
+g
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

@@ -1,0 +1,328 @@
+---
+title: "Normalisation"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Normalisation
+
+The data needs to be normalised to allow differential expression between samples where expression of a genes changes between conditions due to technical factors such as the sequencing depth. Two normalisation approaches are used in this notebook, upper quantile normalisation from the GeoMXTools workflow and model based normalisation from the GeoDiff workflow.
+
+## Load libraries
+
+```{r}
+#| output: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(testthat)
+library(tidyverse)
+library(cowplot)
+library(janitor)
+library(GeoDiff)
+
+source("src/utilityFunctions.R")
+```
+
+## Load filtered data
+
+QC filtered data is loaded from the previous steps. Note that the samples and genes filtered out differ between the approaches.
+
+```{r}
+target_spatialData <- readRDS("results/filteredSpatialData.RDS")
+spatialData_geoDiff <- readRDS("results/GeoDiffSpatialData.RDS")
+```
+
+## Plot negative control probes
+
+There is the expected separation of the Q3 and negative probe counts at both the distribution (A) and per segment (B) levels.
+
+```{r}
+#| label: fig-q3vsneg
+#| fig-cap: Signal to noise ratio using the negative control probes
+#| fig-width: 6
+#| fig-height: 6
+# Graph Q3 value vs negGeoMean of Negatives
+ann_of_interest <- "segment"
+
+#get the negative probes
+negativeProbefData <- subset(fData(target_spatialData), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+Stat_data <- 
+    data.frame(row.names = colnames(exprs(target_spatialData)),
+               Segment = colnames(exprs(target_spatialData)),
+               Annotation = pData(target_spatialData)[, ann_of_interest],
+               Q3 = unlist(apply(exprs(target_spatialData), 2,
+                                 quantile, 0.75, na.rm = TRUE)),
+               NegProbe = exprs(target_spatialData)[neg_probes, ])
+
+
+Stat_data_m <- gather(Stat_data, key ="Statistic" ,value =  "Value", c("Q3", "NegProbe"))
+
+plt1 <- ggplot(Stat_data_m,
+               aes(x = Value, fill = Statistic)) +
+    geom_histogram(bins = 40) + theme_bw() +
+    scale_x_continuous(trans = "log2") +
+    facet_wrap(~Annotation, nrow = 1) + 
+    scale_fill_brewer(palette = 3, type = "qual") +
+    labs(x = "Counts", y = "Segments, #")
+
+plt2 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3, color = Annotation)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + guides(color = "none") + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3 Value, Counts")
+
+plt3 <- ggplot(Stat_data,
+               aes(x = NegProbe, y = Q3 / NegProbe, color = Annotation)) +
+    geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
+    geom_point() + theme_bw() +
+    scale_x_continuous(trans = "log2") + 
+    scale_y_continuous(trans = "log2") +
+    theme(aspect.ratio = 1) +
+    labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")
+
+btm_row <- plot_grid(plt2, plt3, nrow = 1, labels = c("B", ""),
+                     rel_widths = c(0.43,0.57))
+q3vsneg <- plot_grid(plt1, btm_row, ncol = 1, labels = c("A", ""))
+
+
+save_plot(filename = "figures/Normalisation/q3vsneg.png",plot = q3vsneg,
+          base_height = 8,base_width = 8, bg="white")
+
+q3vsneg
+
+```
+
+## Perform normalisation
+
+Upper quantile normalisation is used to take into account the effects of differing sequencing depths.
+
+```{r}
+# Q3 norm (75th percentile) for WTA/CTA  with or without custom spike-ins
+target_spatialData <- NanoStringNCTools::normalize(target_spatialData ,
+                             norm_method = "quant", 
+                             desiredQuantile = .75,
+                             toElt = "q_norm")
+
+saveRDS(target_spatialData,file = "results/normalisedSpatialData.RDS")
+```
+
+## Perform GeoDiff based normalisation
+
+GeoDiff is used to perform the alternative model based normalisation approach.
+
+```{r}
+posdat <- spatialData_geoDiff[-which(fData(spatialData_geoDiff)$CodeClass == "Negative"), ]
+features_all <- rownames(posdat)
+features_high <- rownames(fData(spatialData_geoDiff))[fData(spatialData_geoDiff)$feature_high_fitNBth == 1]
+
+ROIs_high <- sampleNames(spatialData_geoDiff)[which((quantile(fData(spatialData_geoDiff)[["para"]][, 1],
+                                                  probs = 0.90, na.rm = TRUE) -   notes(spatialData_geoDiff)[["threshold"]])*spatialData_geoDiff$sizefact_fitNBth>1)]
+
+spatialData_geoDiff <- fitPoisthNorm(object = spatialData_geoDiff,
+                        ROIs_high = ROIs_high,
+                        features_high=features_high,features_all=features_all,
+                        threshold_mean = notes(spatialData_geoDiff)[["bgMean"]],
+                        sizescalebythreshold = TRUE)
+
+saveRDS(spatialData_geoDiff[,ROIs_high],file = "results/GeoDiffNormalisedSpatialData.RDS")
+
+```
+
+## Boxplots of normalised data
+
+::: panel-tabset
+## Raw data
+
+The raw data shows large difference in sequencing depths.
+
+```{r}
+#| label: fig-rawdataBoxplot
+#| fig-cap: Boxplot of raw data
+#| fig-width: 9
+#| fig-height: 6
+rawData <- log2(exprs(target_spatialData)) %>%  as.data.frame() %>%
+  gather() 
+
+
+metaData <- pData(target_spatialData)[,c("slide name","segment","Annotation")]
+labels <- make_clean_names(metaData$Annotation,case = "parsed")
+
+rawDataPlot <- merge(rawData,metaData,by.x="key",by.y="row.names") %>%
+ggplot(aes(x=key,y=value,fill=`slide name`)) + geom_boxplot() +  ylab("log2 raw counts") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/rawDataBoxplots.png",plot = rawDataPlot,
+          base_height = 7,base_width = 16, bg="white")
+
+rawDataPlot
+
+#| label: fig-rawdataDensity
+#| fig-cap: Density plot of raw data
+#| fig-width: 9
+#| fig-height: 6
+
+rawDataDensity <- rawData %>% merge(.,metaData,by.x="key",by.y="row.names") %>% 
+    ggplot(aes(x=value,color=key)) + geom_density() +  ylab("log2 raw counts") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + theme(legend.position = "none") +  facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/rawDataDensity.png",plot = rawDataDensity,
+          base_height = 7,base_width = 7, bg="white")
+
+rawDataDensity
+
+
+```
+
+## Q3 normalised
+
+The Q3 normalised boxplots look reasonable.
+
+```{r}
+#| label: fig-Q3Boxplot
+#| fig-cap: Boxplot of upper quantile normalised data
+#| fig-width: 9
+#| fig-height: 6
+
+q3Normalised <- log2(assayDataElement(target_spatialData, elt = "q_norm")) %>%  as.data.frame() %>%
+  gather() 
+
+
+metaData <- pData(target_spatialData)[,c("slide name","segment","Annotation","PatientID","Disease")]
+labels <- make_clean_names(metaData$Annotation,case = "parsed")
+
+q3NormalisedPlot <- merge(q3Normalised,metaData,by.x="key",by.y="row.names") %>%
+ggplot(aes(x=key,y=value,fill=`slide name`)) + geom_boxplot() +  ylab("log2 Q3 counts") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/Q3NormalisedPlot.png",plot = q3NormalisedPlot,
+          base_height = 7,base_width = 16, bg="white")
+
+
+q3NormalisedPlot
+
+#| label: fig-Q3Density
+#| fig-cap: Boxplot of upper quantile normalised data
+#| fig-width: 9
+#| fig-height: 6
+#| 
+q3NormalisedDensity <- q3Normalised %>% merge(.,metaData,by.x="key",by.y="row.names") %>% 
+    ggplot(aes(x=value,color=Disease)) + geom_density() +  ylab("log2 Q3 counts") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(legend.position = "none") + facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/q3NormalisedDensity.png",plot = q3NormalisedDensity,
+          base_height = 7,base_width = 7, bg="white")
+
+q3NormalisedDensity
+
+```
+
+## GeoDiff normalised
+
+The GeoDiff normalised data look smoother in the density plots.
+
+```{r}
+#| label: fig-GeoDiffBoxplot
+#| fig-cap: Boxplot of GeoDiff normalised data
+#| fig-width: 9
+#| fig-height: 6
+geoDiffNormalised <- assayDataElement(spatialData_geoDiff[,ROIs_high], elt = "normmat") %>%  as.data.frame() %>%  gather() 
+
+metaData <- pData(target_spatialData)[,c("slide name","segment","Annotation","Disease")]
+
+labels <- make_clean_names(metaData$Annotation,case = "parsed")
+
+geoDiffNormalisedPlot <- merge(geoDiffNormalised,metaData,by.x="key",by.y="row.names") %>%
+ggplot(aes(x=key,y=value,fill=`slide name`)) + geom_boxplot() +  ylab("log Poisson Threshold Normalized values") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/geoDiffNormalisedPlot.png",plot = geoDiffNormalisedPlot,
+          base_height = 7,base_width = 16, bg="white")
+
+
+geoDiffNormalisedPlot
+
+#| label: fig-GeoDiffDensity
+#| fig-cap: Denisty plots of GeoDiff normalised data
+#| fig-width: 9
+#| fig-height: 6
+
+geoDiffNormalisedDensity <- geoDiffNormalised %>% merge(.,metaData,by.x="key",by.y="row.names") %>% 
+    ggplot(aes(x=value,color=Disease)) + geom_density() +  ylab("log Poisson Threshold Normalized values") + xlab("Segment") + theme_cowplot() + scale_x_discrete(labels=labels) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(legend.position = "none") + facet_wrap(~segment)
+
+save_plot(filename = "figures/Normalisation/geoDiffNormalisedDensity.png",plot = geoDiffNormalisedDensity,
+          base_height = 7,base_width = 7, bg="white")
+
+geoDiffNormalisedDensity
+
+```
+:::
+
+## Segment marker expression
+
+Expression of the known segment markers should correspond to the known segment labels if the data is correctly annotated and well normalised.
+
+```{r}
+#| label: fig-segmentMarkers
+#| fig-cap: Boxplots of segment markers to check normalisation
+#| fig-width: 9
+#| fig-height: 6
+#| warning: false
+dat <- log2(assayDataElement(target_spatialData, elt = "q_norm"))
+
+segmentMarkers <- c("CD4","CD3E","CD8A","KRT10")
+
+#plot the protein markers per segment
+g <- dat[segmentMarkers,]  %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Gene") %>%
+  reshape2::melt() %>%  
+  merge(.,metaData,by.x="variable",by.y="row.names") %>%
+  mutate(segment=case_when(segment=="Full ROI" ~ "KRT",TRUE~segment)) %>% 
+  ggplot(aes(x=segment,y=value,color=segment)) + 
+  geom_jitter() + 
+  ylab("log2 Normalized values") +
+  xlab("Segment") +
+  scale_color_brewer(palette = "Set2") +
+  theme_cowplot(font_size = 22) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(~Gene) + 
+  stat_summary(geom="crossbar",fun="mean",colour="black",width=0.2)
+
+
+##differential expression for the markers
+pData(target_spatialData)[pData(target_spatialData)$segment == "Full ROI","segment"] <- "KRT"
+assayDataElement(object = target_spatialData, elt = "log_q") <-
+    assayDataApply(target_spatialData, 2, FUN = log, base = 2, elt = "q_norm")
+diffExp <- lme4DE(target_spatialData[segmentMarkers,],cores = 1,
+                  design = "~Disease + segment + (1 | PatientID)",groupVar="segment")
+
+write.table(diffExp, file = "results/segmentMarkerDiffExp.txt", col.names = TRUE,row.names = FALSE, sep = "\t", quote = FALSE)
+
+save_plot(g,filename = "figures/Normalisation/antibodyValues.png",bg="white",base_height = 8 , base_width = 9)
+saveRDS(g,file="results/stainedGeneExp.RDS")
+g
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

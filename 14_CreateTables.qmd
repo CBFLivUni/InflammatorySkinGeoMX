@@ -1,0 +1,66 @@
+---
+title: "Tables"
+format:
+  docx:
+    output-file: "Tables"
+execute:
+  echo: false
+  warning: false
+---
+
+```{r}
+#load the libraries
+library(gt)
+library(tidyverse)
+library(readxl)
+
+```
+
+## Table 3
+```{r}
+diffExp <- readRDS("results/diffExpLME4_Q3.RDS")
+diffExp %>% filter(Contrast == "KRT_P - KRT_AD") %>% 
+  filter(FDR <= 0.05) %>%
+  select(Gene,Estimate,FDR) %>%
+  arrange(-Estimate) %>%
+  gt() %>%
+  fmt_number(n_sigfig = 3) %>%
+    cols_label(
+    Gene = md("**Gene**"),
+    Estimate = md("**log2 Fold Change**"),
+    FDR ~ md("**FDR**")
+  )
+
+```
+## Table 4
+```{r}
+diffExp <- readRDS("results/diffExpLME4_Q3.RDS")
+diffExp %>% filter(Contrast == "CD4_P - CD4_AD") %>% 
+  filter(FDR <= 0.05) %>%
+  select(Gene,Estimate,FDR) %>%
+  arrange(-Estimate) %>%
+  gt() %>%
+  fmt_number(n_sigfig = 3) %>%
+    cols_label(
+    Gene = md("**Gene**"),
+    Estimate = md("**log2 Fold Change**"),
+    FDR ~ md("**FDR**")
+  )
+
+```
+## Table 5
+```{r}
+diffExp <- readRDS("results/diffExpLME4_Q3.RDS")
+diffExp %>% filter(Contrast == "CD8_P - CD8_AD") %>% 
+  filter(FDR <= 0.05) %>%
+  select(Gene,Estimate,FDR) %>%
+  arrange(-Estimate) %>%
+  gt() %>%
+  fmt_number(n_sigfig = 3) %>%
+    cols_label(
+    Gene = md("**Gene**"),
+    Estimate = md("**log2 Fold Change**"),
+    FDR ~ md("**FDR**")
+  )
+
+```

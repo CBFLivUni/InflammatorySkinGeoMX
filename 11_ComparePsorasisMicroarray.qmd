@@ -1,0 +1,180 @@
+---
+title: "Compare Psorasis KRT fold changes against existing data"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+## Load the libraries
+
+```{r}
+#| output: false
+library(GEOquery)
+library(limma)
+library(affy)
+library(hgu133plus2.db)
+library(genefilter)
+library(ggplot2)
+library(cowplot)
+library(sva)
+library(ggpubr)
+library(ggrepel)
+```
+
+## Get the expression data
+
+```{r}
+options(timeout = 100000000)
+gse <- getGEOSuppFiles("GSE13355")
+
+#untar the files
+untar(rownames(gse),exdir = "data/GSE13355")
+
+files <- list.files("data/GSE13355/", pattern = ".CEL", 
+            ignore.case = TRUE,full.names = TRUE)
+
+expData <- ReadAffy(filenames = files)
+
+getGEOPhenotypeData <- function(accessionNumber) {
+  eset <- try(getGEO(accessionNumber)[[1]])
+  attempt <- 2
+  while (inherits(eset, "try-error") && attempt <= 5) {
+    Sys.sleep(60)
+    attempt <- attempt + 1
+    eset <- try(getGEO(accessionNumber)[[1]])
+  }
+  if (inherits(eset, "try-error")) {
+    stop(sprintf("Failed to access GEO phenotype data for accession number %s", 
+                 accessionNumber))
+  }
+  return(eset)
+}
+
+
+annotateProbes <- function(expMat, annotationFile) {
+  annotationFile <- gsub(".db", replacement = "", annotationFile)
+  geneIDs <- na.omit(stack(mget(as.character(rownames(expMat)), 
+                                get(paste(annotationFile, "SYMBOL", sep = "")), ifnotfound = NA)))
+  expMat <- merge(expMat, geneIDs, by.x = "row.names", by.y = "ind")
+  expMat$Row.names = NULL
+  expMat <- aggregate(expMat[, -ncol(expMat)], by = list(expMat$values), 
+                     FUN = median, na.rm = TRUE)
+  rownames(expMat) <- expMat$Group.1
+  expMat[, 1] <- NULL
+  expMat <- as.matrix(expMat)
+  return(expMat)
+}
+
+eset <- getGEOPhenotypeData("GSE13355")
+rownames(pData(eset)) <- rownames(pData(expData))
+pData(expData) <- pData(eset)
+
+```
+
+## Normalise the data
+```{r}
+eset <- affy::rma(expData)
+expData <- exprs(eset)
+expData <- annotateProbes(expData, "hgu133plus2")
+
+```
+## PCA of the data
+```{r}
+
+PCA.eset <- function(exprs, eset, expFactors, ntop = 30000) {
+  rv <- rowVars(exprs)
+  select <- order(rv, decreasing = TRUE)[seq_len(min(ntop,length(rv)))]
+  pca <- prcomp(t(exprs[select, ]))
+  percentVar <- pca$sdev^2/sum(pca$sdev^2)
+  intgroup.df <- as.data.frame(pData(eset)[, expFactors], drop = FALSE)
+  intgroup.df <- as.data.frame(apply(intgroup.df, 2, function(x) paste("`", x, "`", sep = "")))
+  colnames(intgroup.df) <- make.names(colnames(pData(eset)[expFactors]))
+  d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], intgroup.df)
+  print(intgroup.df)
+
+  if (length(expFactors) > 1) {
+    colnames(d)[3:4] <- c("color","shape")
+    g <- ggplot(data = d, aes(x = PC1, y = PC2,color = color, shape = shape)) + 
+      geom_point(size = 3) + xlab(paste0("PC1: ",round(percentVar[1] * 100), "% variance")) + 
+      ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) +
+      coord_fixed() + scale_colour_discrete(name = colnames(intgroup.df)[1]) + 
+      scale_shape_discrete(name = colnames(intgroup.df)[2])
+  } else {
+    colnames(d)[3] <- "color"
+    g <- ggplot(data = d, aes(x = PC1, y = PC2,color= color)) + geom_point(size = 3) + 
+      xlab(paste0("PC1: ", round(percentVar[1] * 100),"% variance")) + 
+      ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) + 
+      coord_fixed() + scale_colour_discrete(name = colnames(intgroup.df)[1])
+  }
+  
+  g <- g + cowplot::theme_cowplot()
+  loadings <- as.data.frame(pca$rotation[, 1:2])
+  loadings$ID <- rownames(loadings)
+  loadings <- loadings[, c(3, 1, 2)]
+  loadings <- loadings[order(abs(loadings$PC1), decreasing = T),]
+  intgroup.df <- apply(intgroup.df, 1, function(x) paste(gsub('`',"",x),collapse = "_"))
+  return(list(plot = g, loadings = loadings,sampleAnno = intgroup.df))
+}
+
+pca <- PCA.eset(expData, eset, "characteristics_ch1")
+pca
+```
+
+## Differential expression analysis
+```{r}
+
+#keep only the controls and involved skin samples
+ind <- which(!pData(eset)$characteristics_ch1 %in% "uninvolved skin from cases")
+expData <- expData[,ind]
+eset <- eset[,ind]
+
+design <- model.matrix(as.formula("~0 + characteristics_ch1"), data = pData(eset))
+colnames(design) <- c("Psorasis","Controls")
+
+#perform sva      
+mod0 <-  model.matrix(~1, data =  pData(eset))
+svafit <- sva(expData, mod = design, mod0 = mod0)
+svafit$sv <- as.matrix(svafit$sv)
+colnames(svafit$sv) <- paste0("batch", 1:svafit$n.sv)
+design <- cbind(design, svafit$sv)
+
+fit <- lmFit(expData, design)
+contrasts <- "Psorasis - Controls"
+contrast.matrix <- makeContrasts(contrasts = contrasts, 
+            levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+results <- topTable(fit2, coef = contrasts, number = Inf, 
+                   sort.by = "none")
+results$ID <- rownames(results)
+results <- results[, c(ncol(results), 1:ncol(results)-1)]
+
+write.table(results, file = "results/GSE13355.txt", col.names = TRUE,row.names = FALSE, sep = "\t", quote = F)
+```
+
+## Compare to GeoMX spatial data
+```{r}
+geomx <- readRDS("results/diffExpLME4_Q3.RDS")
+geomx <- geomx[ geomx$Contrast=="KRT_P - KRT_H",]
+
+combined <- merge(results,geomx,by.x="ID",by.y="Gene")
+
+plotGenes <- combined[ combined$logFC >=4 | combined$logFC<=-2.5,"ID"]
+
+
+
+g1 <- ggscatter(combined,x="logFC",y="Estimate", cor.coef = TRUE, cor.coeff.args = list(method = "spearman", label.sep = "\n"),cor.coef.size = 8) +
+  cowplot::theme_cowplot(font_size = 24)  +xlab("GSE13355 Psorasis vs Healthy ")+ylab("KRT Psorasis vs Healthy") + geom_text_repel(data = subset(combined,ID %in% plotGenes), aes(label=ID,fontface ="bold"),size=6,color="red",max.overlaps = Inf,force = 35,min.segment.length = 0,seed = 42)
+
+saveRDS(g1,file="results/psorasisMicroarrayScatter.RDS")
+
+g1
+```

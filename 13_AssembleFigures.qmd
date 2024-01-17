@@ -1,0 +1,223 @@
+---
+title: "Assemble Figures for paper"
+author: "Jamie Soul"
+date: today
+date-format: short
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+editor: visual
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+## Figure 2
+
+```{r}
+library(patchwork)
+library(grid)
+library(ggplot2)
+library(cowplot)
+library(ComplexHeatmap)
+library(enrichplot)
+
+PCA <- readRDS("results/PCA.RDS")
+markerGenes <- readRDS("results/stainedGeneExp.RDS")
+heatMap <- grid.grabExpr(draw(readRDS("results/CellHeatmap.RDS")))
+deconv <-  grid.grabExpr(draw(readRDS("results/Fig1E_spatialDeconSkinHeatmap.RDS")))
+
+
+markerGenes <- markerGenes + theme(legend.position = "none") + xlab("Staining")
+
+
+
+g <- (PCA[[1]] + PCA[[2]] + PCA[[3]])/(markerGenes + heatMap)/(deconv) + plot_annotation(tag_levels = 'A') & theme(plot.tag = element_text(face = 'bold',size = 22))
+
+
+layout <-
+"AAAACCCC
+ DDDDEEEE
+ DDDDEEEE
+ ##FFF###"
+
+g <- PCA[[1]] + PCA[[2]] + markerGenes +  heatMap + deconv+ plot_annotation(tag_levels = 'A')  + plot_layout(design = layout) & theme(plot.tag = element_text(face = 'bold',size = 22))
+save_plot("figures/Fig2.png",plot = g,base_height = 14,base_width = 12,bg="white")
+
+
+```
+
+## Figure 3
+
+```{r}
+#volcano plots
+volcano <- readRDS("results/volcanoplots.RDS")
+venns <- readRDS("results/vennKRT.RDS")
+goplot <- readRDS("results/GOPlot_KRT.RDS")
+kegg <- readRDS("results/KEGGdotplot.RDS")
+# scatterP <- readRDS("results/psorasisMicroarrayScatter.RDS")
+# scatterAD <- readRDS("results/ADMicroarrayScatter.RDS")
+
+# volcanoPlot <- (volcano$`KRT_AD - KRT_H` + volcano$`KRT_P - KRT_H` + volcano$`KRT_P - KRT_AD`)/ (venns$krt_venn_up + venns$krt_venn_down)/(goplot+kegg)/(scatterP + scatterAD) + plot_annotation(tag_levels = 'A') & theme(plot.tag = element_text(face = 'bold',size = 22))
+
+
+row1 <- cowplot::plot_grid(plotlist = list(volcano$`KRT_P - KRT_H`,volcano$`KRT_AD - KRT_H`, volcano$`KRT_P - KRT_AD`),nrow = 1,labels = LETTERS[1:3],label_size = 25)
+
+row2 <- cowplot::plot_grid(plotlist = list(venns$krt_venn_up, venns$krt_venn_down),nrow = 1,labels = LETTERS[4:5],label_size = 25)
+
+row3 <-   cowplot::plot_grid(plotlist = list(goplot,kegg),nrow = 1,labels = LETTERS[6:7],label_size = 25,rel_widths = c(1,0.9))
+
+# row4 <- cowplot::plot_grid(plotlist = list(scatterP, scatterAD),nrow = 1,labels=LETTERS[8:9],label_size = 25)
+
+p <- cowplot::plot_grid(plotlist = list(row1,row2,row3),nrow = 3,rel_heights=c(0.68,0.4,0.8))
+
+
+
+save_plot("figures/Fig3.png",plot = p,base_height = 18,base_width = 14,bg="white")
+
+```
+
+## Figure 4
+
+```{r}
+#volcano plots
+# volcano <- readRDS("results/TcellMA.RDS")
+volcano <- readRDS("results/volcanoplots.RDS")
+venncd4 <- readRDS("results/vennCD4.RDS")
+venncd8 <- readRDS("results/vennCD8.RDS")
+kegg <- readRDS("results/KEGGdotplottcell.RDS")
+goplot <- readRDS("results/GOPlot_tcells.RDS")
+
+# volcanoPlot <- (volcano$`KRT_AD - KRT_H` + volcano$`KRT_P - KRT_H`)/(volcano$`CD4_AD - CD4_H` + volcano$`CD4_P - CD4_H`)/(volcano$`CD8_AD - CD8_H`+volcano$`CD8_P - CD8_H`)
+
+# volcanoPlot <- volcano +  plot_annotation(tag_levels = 'A') & theme(plot.tag = element_text(face = 'bold',size = 22))
+
+row1 <- cowplot::plot_grid(plotlist = list(volcano$`CD4_P - CD4_H`,volcano$`CD4_AD - CD4_H`,volcano$`CD4_P - CD4_AD`, volcano$`CD8_P - CD8_H`,volcano$`CD8_AD - CD8_H`,volcano$`CD8_P - CD8_AD`),nrow = 2,labels = LETTERS[1:6],label_size = 25)
+
+row2 <- cowplot::plot_grid(plotlist = list(venncd4$cd4_venn_up + theme(plot.margin=margin(0,-80,0,-80)),venncd4$cd4_venn_down + theme(plot.margin=margin(0,-80,0,-80))),nrow = 2,labels = LETTERS[7:8],label_size = 25)
+
+# row2 <- venncd4$cd4_venn_up + theme(plot.margin=margin(-240,-40,-150,-40)) + venncd4$cd4_venn_down + theme(plot.margin=margin(-240,-40,-150,-40))
+
+row3 <- cowplot::plot_grid(plotlist = list(venncd8$cd8_venn_up+ theme(plot.margin=margin(0,-80,-0,-80)),venncd8$cd8_venn_down+ theme(plot.margin=margin(0,-80,0,-80))),nrow = 2,labels = LETTERS[9:10],label_size = 25)
+
+row2 <- row2 + row3
+
+row4 <- cowplot::plot_grid(plotlist = list(goplot,kegg),nrow = 1,labels = LETTERS[11:12],label_size = 25)
+
+p <- cowplot::plot_grid(plotlist = list(row1,row2,row4),nrow = 3,rel_heights = c(1,0.9,0.7))
+
+save_plot("figures/Fig4.png",plot = p,base_height = 24,base_width = 15,bg="white")
+```
+
+## Figure 5
+
+```{r}
+
+nicheNet <- readRDS("results/nicheNetPlots.RDS")
+
+
+
+r2 <- nicheNet$LR_AD +  scale_fill_gradient(low = "white", high = "red",labels = function(x) sprintf("%.1f", x)) + ylab("Prioritised ligands in AD") + xlab("Receptors") + theme(text = element_text(size=16,color = "black"),axis.title =  element_text(size=22),legend.text = element_text(size = 12),legend.key.width = unit(1, "cm"),axis.text = element_text(size=14,color = "black")) + guides(fill = guide_legend(title.position = "top", title.hjust=0.5))
+
+
+r1 <- nicheNet$LR_P +  scale_fill_gradient(low = "white", high = "red",labels = function(x) sprintf("%.1f", x)) + ylab("Prioritised ligands in Psorasis") + xlab("Receptors") + theme(text = element_text(size=16,color = "black"),axis.title =  element_text(size=22),legend.text = element_text(size = 12),legend.key.width = unit(1, "cm"),axis.text = element_text(size=14,color = "black"))  + guides(fill = guide_legend(title.position = "top", title.hjust=0.5))
+
+
+
+# layout <-
+# "AACC
+#  BBCC"
+# 
+# 
+# g <- r1 + r2 + heatmap + plot_annotation(tag_levels = 'A')  + plot_layout(design = layout) & theme(plot.tag = element_text(face = 'bold',size = 22))
+# save_plot("figures/Fig4.png",plot = g,base_height = 12,base_width = 12,bg="white")
+# 
+
+row1 <- cowplot::plot_grid(nicheNet$heatmap,ncol=1,labels = LETTERS[1],label_size = 25)
+row2 <- cowplot::plot_grid(r1,r2,ncol=1,labels = LETTERS[2:3],label_size = 25)
+g <- cowplot::plot_grid(row1,row2,ncol=2,byrow = FALSE,rel_widths = c(0.7,1))
+save_plot("figures/Fig5.png",plot = g,base_height = 14,base_width = 12,bg="white")
+
+
+
+
+```
+
+## Figure 6
+
+```{r}
+# stripPlots <- readRDS("results/stripPlotsFull.RDS")
+# 
+# p <- cowplot::plot_grid(plotlist = list(stripPlots$CD4_1,stripPlots$CD8_1),labels = LETTERS[1:2],label_size = 25,nrow = 2,rel_heights = c(0.9,0.7))
+
+plots <- readRDS("results/ncounterPlots.RDS")
+
+save_plot("figures/Fig6.png",plot = plots$cd8Combined,base_height = 4,base_width = 7,bg="white")
+
+
+
+```
+
+## Figure 6
+
+```{r}
+# stripPlots <- readRDS("results/stripPlotsFull.RDS")
+# 
+# p <- cowplot::plot_grid(plotlist = list(stripPlots$CD4_1,stripPlots$CD8_1),labels = LETTERS[1:2],label_size = 25,nrow = 2,rel_heights = c(0.9,0.7))
+
+plots <- readRDS("results/ncounterPlots.RDS")
+
+
+p <- cowplot::plot_grid(plotlist = list(plots$cd4Seperate,plots$cd8Seperate),labels = LETTERS[1:2],label_size = 25,nrow = 2,rel_heights = c(1,0.7))
+
+save_plot("figures/Fig7.png",plot = p,base_height = 12,base_width = 12,bg="white")
+
+
+
+```
+
+## Supplementary Figures
+
+### Supplementary Figure 1
+
+```{r}
+scatterP <- readRDS("results/psorasisMicroarrayScatter.RDS")
+scatterAD <- readRDS("results/ADMicroarrayScatter.RDS")
+
+g <- scatterP + scatterAD + plot_annotation(tag_levels = 'A') & theme(plot.tag = element_text(face = 'bold',size = 22))
+save_plot("figures/SupplementaryFig1.png",plot = g,base_height = 8,base_width = 12,bg="white")
+
+```
+
+### Supplementry Figure 2
+
+```{r}
+
+
+```
+
+## Supplementary Tables
+
+```{r}
+#differential expression results
+file.copy("results/diffExpLME4_Q3.xlsx","tables/SupplementryTable1.xlsx")
+
+#pathway enrichment
+file.copy("results/diseasePathways.xlsx","tables/SupplementryTable2.xlsx")
+
+#GOenrichment
+file.copy("results/diseaseGeneOntology.xlsx","tables/SupplementryTable3.xlsx")
+
+#Ligand receptor interactions
+file.copy("results/nicheNet.xlsx","tables/SupplementryTable4.xlsx")
+
+#validation candidates
+file.copy("results/Validation.xlsx","tables/SupplementryTable5.xlsx")
+
+#validation differential expression
+file.copy("results/NCounter_DESeq2_Results.xlsx","tables/SupplementryTable6.xlsx")
+
+
+
+```
